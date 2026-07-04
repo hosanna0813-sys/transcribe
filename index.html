@@ -105,6 +105,13 @@
   .primary:disabled{opacity:.45;cursor:not-allowed}
   .ghost{padding:9px 18px;background:var(--card);color:var(--ink);border:1px solid var(--ink);font-weight:500}
   .ghost:hover{opacity:.75}
+  .keylinks{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .keylinks a{
+    text-decoration:none;font-size:.82rem;letter-spacing:.06em;
+    padding:8px 14px;border-radius:calc(var(--radius)/2);
+    display:inline-flex;align-items:center;
+  }
+  .keylinks a:focus-visible{outline:2px solid var(--seal);outline-offset:2px}
   #status{margin-top:14px;font-size:.85rem;line-height:1.7;display:none;padding:10px 12px;border-radius:calc(var(--radius)/2)}
   #status.busy{display:block;background:rgba(127,127,127,.12);color:var(--ink)}
   #status.err{display:block;background:rgba(196,69,58,.12);color:var(--seal)}
@@ -138,6 +145,12 @@
   <section>
     <div class="step"><b>壹</b><h2>填入 OpenAI API Key</h2></div>
     <input type="password" id="apiKey" placeholder="sk-..." autocomplete="off">
+    <div class="keylinks">
+      <a class="ghost" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">申請 API Key ↗</a>
+      <a class="ghost" href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener">儲值與帳單 ↗</a>
+      <a class="ghost" href="https://platform.openai.com/settings/organization/limits" target="_blank" rel="noopener">設用量上限 ↗</a>
+    </div>
+    <p class="hint">首次使用:先到「申請 API Key」註冊並建立一把 Key,再到「儲值與帳單」加值(最低 US$5);建議順手到「設用量上限」設定每月費用上限以防超支。</p>
     <div class="checks" style="margin-top:10px">
       <label class="check"><input type="checkbox" id="saveKey">
         <span>在此裝置記住 API Key<small>儲存在這台裝置的瀏覽器中,下次開啟自動帶入;取消勾選即刪除。共用電腦請勿勾選。</small></span></label>
