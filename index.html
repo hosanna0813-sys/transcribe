@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>語音轉逐字稿(兩階段版)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://api.openai.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   /* ============ 主題一:卷宗(預設)──公文紙、墨藍、印泥紅 ============ */
@@ -305,6 +307,51 @@
     function swap(a,b){var t=files[a];files[a]=files[b];files[b]=t;renderList();}
   }
 
+  /* ---------- 共用:等待、自動重試、限量並行 ---------- */
+  function wait(ms){return new Promise(function(r){setTimeout(r,ms);});}
+
+  /* 429(速率限制)、5xx、網路瞬斷時以 2s/4s/8s 退避自動重試;額度用盡(insufficient_quota)不重試 */
+  function fetchRetry(url,opts,attempt){
+    attempt=attempt||0;
+    var MAX=3;
+    return fetch(url,opts).then(function(res){
+      if((res.status===429||res.status>=500)&&attempt<MAX){
+        return res.text().then(function(t){
+          if(res.status===429&&t.indexOf('insufficient_quota')>=0)throw httpErr(429,t);
+          return wait(2000*Math.pow(2,attempt)).then(function(){return fetchRetry(url,opts,attempt+1);});
+        });
+      }
+      return res;
+    },function(){
+      if(attempt>=MAX)throw new Error('網路連線失敗,已自動重試仍無法連上,請檢查網路後再試。');
+      return wait(2000*Math.pow(2,attempt)).then(function(){return fetchRetry(url,opts,attempt+1);});
+    });
+  }
+
+  /* 最多同時 limit 件並行處理,結果依原順序回傳 */
+  function pool(items,limit,worker){
+    var results=new Array(items.length),idx=0,active=0,failed=false;
+    return new Promise(function(resolve,reject){
+      if(!items.length)return resolve(results);
+      function launch(){
+        while(active<limit&&idx<items.length&&!failed){
+          (function(i){
+            active++;
+            worker(items[i],i).then(function(r){
+              results[i]=r;active--;
+              if(failed)return;
+              if(idx>=items.length&&active===0)resolve(results);
+              else launch();
+            }).catch(function(e){
+              if(!failed){failed=true;reject(e);}
+            });
+          })(idx++);
+        }
+      }
+      launch();
+    });
+  }
+
   function fmtTime(sec){
     sec=Math.floor(sec);
     var h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60;
@@ -372,7 +419,7 @@
     var vocabRaw=$('vocab').value.replace(/→[^,，、\n]*/g,'').replace(/\s+/g,' ').trim();
     if(vocabRaw)form.append('prompt',vocabRaw.slice(0,200));
 
-    return fetch('https://api.openai.com/v1/audio/transcriptions',{
+    return fetchRetry('https://api.openai.com/v1/audio/transcriptions',{
       method:'POST',headers:{'Authorization':'Bearer '+key},body:form
     }).then(function(res){
       if(!res.ok)return res.text().then(function(t){throw httpErr(res.status,t);});
@@ -403,20 +450,20 @@
       setStatus('階段一:Whisper 轉錄中……'+label,'busy');
       return transcribeBlob(key,f,f.name,offset,useTime);
     }
-    /* 大檔:切分後逐段轉錄、時間接續 */
+    /* 大檔:切分後並行轉錄(每段時間偏移事先算好,結果依原順序合併) */
     return splitFile(f,label).then(function(parts){
-      var texts=[],localOffset=offset,total=0;
-      function nextPart(j){
-        if(j>=parts.length)return Promise.resolve({text:texts.join('\n\n'),duration:total});
-        setStatus('階段一:Whisper 轉錄中……'+label+'(切分段 '+(j+1)+' / '+parts.length+')','busy');
-        return transcribeBlob(key,parts[j].blob,'part'+(j+1)+'.wav',localOffset,useTime).then(function(r){
-          texts.push(r.text);
-          localOffset+=parts[j].dur;
-          total+=parts[j].dur;
-          return nextPart(j+1);
+      var offsets=[],off=offset,total=0,done=0;
+      parts.forEach(function(p){offsets.push(off);off+=p.dur;total+=p.dur;});
+      setStatus('階段一:Whisper 轉錄中……'+label+'(切分段完成 0 / '+parts.length+')','busy');
+      return pool(parts,3,function(p,j){
+        return transcribeBlob(key,p.blob,'part'+(j+1)+'.wav',offsets[j],useTime).then(function(r){
+          done++;
+          setStatus('階段一:Whisper 轉錄中……'+label+'(切分段完成 '+done+' / '+parts.length+')','busy');
+          return r.text;
         });
-      }
-      return nextPart(0);
+      }).then(function(texts){
+        return {text:texts.join('\n\n'),duration:total};
+      });
     });
   }
 
@@ -431,6 +478,10 @@
         parts.push(header+r.text);
         offset+=r.duration;
         return next(i+1);
+      }).catch(function(err){
+        /* 保留已完成檔案的成果,失敗時不至於整批丟失 */
+        if(parts.length&&!err.partialText){err.partialText=parts.join('\n\n');err.failedAt=files[i].name;}
+        throw err;
       });
     }
     return next(0);
@@ -465,27 +516,26 @@
   function correct(key,text){
     var chunks=chunkText(text,6000);
     var sys=buildSystemPrompt();
-    var results=[];
-    function next(i){
-      if(i>=chunks.length)return Promise.resolve(results.join('\n\n'));
-      setStatus('階段二:ChatGPT 校正中……(第 '+(i+1)+' / '+chunks.length+' 段)','busy');
-      return fetch('https://api.openai.com/v1/chat/completions',{
+    var done=0;
+    setStatus('階段二:ChatGPT 校正中……(完成 0 / '+chunks.length+' 段)','busy');
+    return pool(chunks,3,function(chunk){
+      return fetchRetry('https://api.openai.com/v1/chat/completions',{
         method:'POST',
         headers:{'Authorization':'Bearer '+key,'Content-Type':'application/json'},
         body:JSON.stringify({
           model:$('gptModel').value,
           temperature:0,
-          messages:[{role:'system',content:sys},{role:'user',content:chunks[i]}]
+          messages:[{role:'system',content:sys},{role:'user',content:chunk}]
         })
       }).then(function(res){
         if(!res.ok)return res.text().then(function(t){throw httpErr(res.status,t);});
         return res.json();
       }).then(function(data){
-        results.push((data.choices[0].message.content||'').trim());
-        return next(i+1);
+        done++;
+        setStatus('階段二:ChatGPT 校正中……(完成 '+done+' / '+chunks.length+' 段)','busy');
+        return (data.choices[0].message.content||'').trim();
       });
-    }
-    return next(0);
+    }).then(function(results){return results.join('\n\n');});
   }
 
   function httpErr(code,body){
@@ -520,6 +570,9 @@
       if(rawText){
         fixedText='';showResult();
         setStatus('階段二校正失敗,已顯示原始轉錄結果。'+escapeHtml(err.message),'err');
+      }else if(err.partialText){
+        rawText=err.partialText;fixedText='';showResult();
+        setStatus('轉錄「'+escapeHtml(err.failedAt||'')+'」時中斷,已顯示先前完成的部分。'+escapeHtml(err.message),'err');
       }else{
         setStatus(escapeHtml(err.message),'err');
       }
