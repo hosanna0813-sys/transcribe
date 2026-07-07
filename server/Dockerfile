@@ -1,9 +1,9 @@
 FROM python:3.12-slim
 
-# ffmpeg(轉檔)+ Node.js 20 + git(PO Token 產生器建置需要)
+# ffmpeg(轉檔)+ Node.js 22(yt-dlp JS 挑戰求解與 PO Token 產生器都需要)+ git
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates git \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
