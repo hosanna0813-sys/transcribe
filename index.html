@@ -383,8 +383,11 @@
 <script>
 (function(){
   var DEFAULT_VOCAB='輿情, 行政院, 災害防救, 新聞稿, 記者會, 質詢, 陳情, 簽呈, 公文, 府會聯絡, 局處, 科長, 專門委員, 參事, 主任秘書';
-  /* 站長內建的 YouTube 伺服器網址:填入後所有訪客零設定直接可用(進階選項可個別覆蓋) */
-  var DEFAULT_YT_SERVER=(typeof window.__DEFAULT_YT_SERVER==='string')?window.__DEFAULT_YT_SERVER:'https://transcribe-yt-j7kv.onrender.com';
+  /* 站長內建的 YouTube 伺服器清單(依優先序,連不上自動換下一台;進階選項可個別覆蓋)
+     首位放家用中繼站(住宅 IP,免驗證),Render 作為備援 */
+  var DEFAULT_YT_SERVERS=(window.__DEFAULT_YT_SERVERS instanceof Array)?window.__DEFAULT_YT_SERVERS:[
+    'https://transcribe-yt-j7kv.onrender.com'
+  ];
   var SIZE_LIMIT=25*1024*1024;
   var CHUNK_SEC=600; /* 每段約 10 分鐘(16kHz 單聲道 WAV 約 19 MB) */
   var files=[];
@@ -449,11 +452,32 @@
   });
   $('ytServer').value=read('tw_ytserver')||'';
   $('ytServer').addEventListener('input',function(){store('tw_ytserver',this.value.trim());});
-  function ytServer(){
+  function ytServers(){
     var custom=($('ytServer').value||'').trim().replace(/\/+$/,'');
-    return custom||DEFAULT_YT_SERVER.replace(/\/+$/,'');
+    if(custom)return [custom];
+    return DEFAULT_YT_SERVERS.map(function(u){return String(u).trim().replace(/\/+$/,'');}).filter(Boolean);
   }
   function srvErrMsg(t){try{return JSON.parse(t).detail||null;}catch(e){return null;}}
+
+  /* 依序嘗試各伺服器:網路錯誤、5xx、429(忙碌/超額)換下一台;4xx 業務錯誤直接回報 */
+  function ytFetch(path){
+    var servers=ytServers();
+    if(!servers.length)return Promise.reject(new Error('尚未設定 YouTube 伺服器網址,請到「進階選項」填入。'));
+    function tryAt(i){
+      return fetchRetry(servers[i]+path,{}).then(function(res){
+        if(res.ok)return res;
+        return res.text().then(function(t){
+          var e=new Error(srvErrMsg(t)||('伺服器回應錯誤(HTTP '+res.status+')'));
+          if(res.status>=500||res.status===429)e.retryNext=true;
+          throw e;
+        });
+      }).catch(function(err){
+        if(i+1<servers.length&&(err.retryNext||/網路連線失敗/.test(err.message)))return tryAt(i+1);
+        throw err;
+      });
+    }
+    return tryAt(0);
+  }
 
   /* ---------- YouTube 來源 ---------- */
   $('ytAddBtn').addEventListener('click',function(){
@@ -462,15 +486,13 @@
     if(!/^https?:\/\/(www\.|m\.|music\.)?(youtube\.com\/|youtu\.be\/)/i.test(url)){
       setAlert('這看起來不是 YouTube 網址,請確認後再試。','err');return;
     }
-    var srv=ytServer();
-    if(!srv){
+    if(!ytServers().length){
       $('adv').open=true;$('ytServer').focus();
       setAlert('YouTube 功能尚未啟用:需先部署伺服器並設定網址(部署方式見 server/README.md),或在「進階選項」填入自架伺服器網址。','err');return;
     }
     var b=this;b.disabled=true;b.textContent='查詢中…';
     setAlert('正在查詢影片資訊……若伺服器休眠中,喚醒可能需要 30–60 秒,請耐心等候。','ok');
-    fetchRetry(srv+'/info?url='+encodeURIComponent(url),{}).then(function(res){
-      if(!res.ok)return res.text().then(function(t){throw new Error(srvErrMsg(t)||('伺服器回應錯誤(HTTP '+res.status+')'));});
+    ytFetch('/info?url='+encodeURIComponent(url)).then(function(res){
       return res.json();
     }).then(function(d){
       files.push({kind:'yt',url:url,name:d.title||'YouTube 影片',duration:d.duration||0,
@@ -752,18 +774,14 @@
     });
   }
 
-  /* 從 Render 後端下載 YouTube 音訊(伺服器端已完成起訖截取與壓縮) */
+  /* 從後端下載 YouTube 音訊(伺服器端已完成起訖截取與壓縮;多台伺服器自動備援) */
   function fetchYtAudio(en){
-    var srv=ytServer();
-    if(!srv)return Promise.reject(new Error('尚未設定 YouTube 伺服器網址,請到「進階選項」填入。'));
+    if(!ytServers().length)return Promise.reject(new Error('尚未設定 YouTube 伺服器網址,請到「進階選項」填入。'));
     P.segDone=0;P.segCount=1;P.sub='下載 YouTube 音訊中……(伺服器休眠時喚醒需 30–60 秒)';progRender();
-    var q=srv+'/audio?url='+encodeURIComponent(en.url);
+    var q='/audio?url='+encodeURIComponent(en.url);
     if(en.start!=null)q+='&start='+en.start;
     if(en.end!=null)q+='&end='+en.end;
-    return fetchRetry(q,{}).then(function(res){
-      if(!res.ok)return res.text().then(function(t){throw new Error(srvErrMsg(t)||('下載 YouTube 音訊失敗(HTTP '+res.status+')'));});
-      return res.blob();
-    });
+    return ytFetch(q).then(function(res){return res.blob();});
   }
 
   function transcribeBlob(key,blobOrFile,fname,offset,useTime){
