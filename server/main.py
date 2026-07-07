@@ -15,10 +15,13 @@ import glob
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
+from collections import defaultdict, deque
 
 import yt_dlp
 from yt_dlp.utils import download_range_func
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
@@ -29,6 +32,37 @@ MAX_FILE_BYTES = 100 * 1024 * 1024  # 暫存檔大小上限 100 MB
 YT_URL_RE = re.compile(
     r"^https?://(www\.|m\.|music\.)?(youtube\.com/(watch|shorts|live)|youtu\.be/)", re.I
 )
+
+# ---- 公開服務保護:每 IP 速率限制 + 並行下載上限 ----
+RATE_WINDOW_SEC = 3600
+RATE_LIMITS = {"info": 30, "audio": 10}   # 每 IP 每小時
+_rate_lock = threading.Lock()
+_rate_hits: dict = defaultdict(deque)     # (bucket, ip) -> deque[timestamp]
+_audio_slots = threading.Semaphore(2)     # 同時最多 2 個下載工作
+
+
+def client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def rate_check(bucket: str, request: Request) -> None:
+    ip = client_ip(request)
+    now = time.time()
+    key = (bucket, ip)
+    with _rate_lock:
+        hits = _rate_hits[key]
+        while hits and now - hits[0] > RATE_WINDOW_SEC:
+            hits.popleft()
+        if len(hits) >= RATE_LIMITS[bucket]:
+            raise HTTPException(429, "使用次數已達上限(防止服務被濫用),請一小時後再試")
+        hits.append(now)
+        # 順手清掉整批過期的 key,避免記憶體累積
+        if len(_rate_hits) > 5000:
+            for k in [k for k, v in _rate_hits.items() if not v or now - v[-1] > RATE_WINDOW_SEC]:
+                del _rate_hits[k]
 
 app = FastAPI(title="transcribe-yt", docs_url=None, redoc_url=None)
 
@@ -66,7 +100,8 @@ def healthz():
 
 
 @app.get("/info")
-def info(url: str = Query(...)):
+def info(request: Request, url: str = Query(...)):
+    rate_check("info", request)
     check_url(url)
     d = probe(url)
     duration = int(d.get("duration") or 0)
@@ -80,10 +115,12 @@ def info(url: str = Query(...)):
 
 @app.get("/audio")
 def audio(
+    request: Request,
     url: str = Query(...),
     start: float | None = Query(None, ge=0),
     end: float | None = Query(None, gt=0),
 ):
+    rate_check("audio", request)
     check_url(url)
     if start is not None and end is not None and end <= start:
         raise HTTPException(400, "終點必須大於起點")
@@ -97,13 +134,18 @@ def audio(
     elif clip_len > MAX_CLIP_SEC:
         raise HTTPException(400, "截取片段超過 2 小時上限,請縮短範圍")
 
+    if not _audio_slots.acquire(blocking=False):
+        raise HTTPException(429, "伺服器忙碌中(同時處理數已滿),請稍候一分鐘再試")
     tmpdir = tempfile.mkdtemp(prefix="ytaudio-")
     try:
-        return _fetch_and_transcode(url, tmpdir, start, end)
+        resp = _fetch_and_transcode(url, tmpdir, start, end)
     except Exception:
         # 任何失敗都立即清掉暫存,不讓檔案留在伺服器上
         shutil.rmtree(tmpdir, ignore_errors=True)
+        _audio_slots.release()
         raise
+    _audio_slots.release()
+    return resp
 
 
 def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float | None):
