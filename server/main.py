@@ -96,7 +96,15 @@ def _bot_blocked(msg: str) -> bool:
 
 
 def _ydl_base(extra: dict | None = None, client: list | None = None) -> dict:
-    opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "socket_timeout": 30}
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 30,
+        # yt-dlp 解 YouTube JS 挑戰需要 JS 執行環境;預設只找 deno,
+        # 這裡明確啟用容器內的 Node(求解腳本由 yt-dlp-ejs 套件內建提供)
+        "js_runtimes": {"node": {}},
+    }
     if os.path.exists(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
     if client:
