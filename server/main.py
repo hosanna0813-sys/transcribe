@@ -135,6 +135,32 @@ def healthz():
     return {"ok": True, "pot_provider": pot}
 
 
+@app.get("/diag")
+def diag(request: Request, url: str = Query(...)):
+    """遠端診斷:回傳 yt-dlp 詳細日誌,用於排查 YouTube 驗證問題(與 /info 共用速率額度)"""
+    rate_check("info", request)
+    check_url(url)
+    lines: list = []
+
+    class Cap:
+        def debug(self, m): lines.append(str(m))
+        def info(self, m): lines.append(str(m))
+        def warning(self, m): lines.append("WARN " + str(m))
+        def error(self, m): lines.append("ERR " + str(m))
+
+    for client in (None, ["tv"]):
+        opts = _ydl_base({"skip_download": True, "logger": Cap(), "verbose": True}, client)
+        opts.pop("quiet", None)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                d = ydl.extract_info(url, download=False)
+                return {"ok": True, "client": client, "title": d.get("title"),
+                        "log_tail": [l[:300] for l in lines[-50:]]}
+        except Exception as e:
+            lines.append(f"EXC({client}): {str(e)[:300]}")
+    return {"ok": False, "log_tail": [l[:300] for l in lines[-90:]]}
+
+
 @app.get("/info")
 def info(request: Request, url: str = Query(...)):
     rate_check("info", request)
