@@ -124,7 +124,15 @@ def probe(url: str) -> dict:
 
 @app.get("/healthz")
 def healthz():
-    return {"ok": True}
+    # 一併回報 PO Token 產生器(bgutil,4416 埠)是否運作,方便部署後驗證
+    pot = False
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:4416/ping", timeout=3) as r:
+            pot = r.status == 200
+    except Exception:
+        pot = False
+    return {"ok": True, "pot_provider": pot}
 
 
 @app.get("/info")

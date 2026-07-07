@@ -29,9 +29,15 @@
   - 只接受來自本工具網頁(hosanna0813-sys.github.io)的瀏覽器請求(CORS)
 - **限制**:整部影片上限 3 小時;截取片段上限 2 小時;單一請求音訊上限 100 MB
 
-## YouTube 機器人驗證解法(cookies)
+## YouTube 機器人驗證(已內建 PO Token 產生器)
 
-YouTube 常對雲端機房 IP 顯示「Sign in to confirm you're not a bot」。程式已內建兩層突破:先自動改用 tv 播放器客戶端重試;若仍被擋,最可靠的解法是提供 cookies:
+YouTube 常對雲端機房 IP 顯示「Sign in to confirm you're not a bot」。本服務已**內建 PO Token 產生器**(bgutil,隨 Docker 一併建置與啟動):yt-dlp 每次請求會自動附上模擬瀏覽器產生的通行憑證,**不需要任何 Google 帳號、不需要 cookies、不需要定期維護**。可透過 `GET /healthz` 的 `pot_provider` 欄位確認產生器運作中。
+
+若日後 YouTube 大改版導致 PO Token 暫時失效(錯誤訊息再次出現「驗證身分」),有兩個處理方式:
+1. 重新部署以取得新版產生器(必要時請開發者更新 Dockerfile 與外掛版本)
+2. 加上 cookies 作為額外備援(見下節,可與 PO Token 並存)
+
+## 備援選項:cookies(通常不需要)
 
 1. 用瀏覽器(建議無痕視窗)登入一個**拋棄式 Google 帳號**——不要用你的主帳號,理論上帳號有被 YouTube 停用的風險——然後打開 youtube.com
 2. 安裝瀏覽器擴充功能「**Get cookies.txt LOCALLY**」(Chrome/Edge 商店搜尋得到)
