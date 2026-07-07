@@ -291,7 +291,7 @@
           <input type="text" id="ytUrl" placeholder="https://www.youtube.com/watch?v=..." inputmode="url" autocomplete="off">
           <button class="ghost" id="ytAddBtn" type="button">加入</button>
         </div>
-        <p class="hint">加入後可在清單中按「截取」設定起訖時間。此功能需先部署伺服器並在「進階選項」填入網址(<a href="https://github.com/hosanna0813-sys/transcribe/blob/main/server/README.md" target="_blank" rel="noopener">部署說明 ↗</a>)。</p>
+        <p class="hint">貼上網址按「加入」即可,加入後可在清單中按「截取」設定只轉錄的起訖時間。</p>
       </div>
     </section>
 
@@ -317,9 +317,9 @@
           </select>
         </div>
         <div>
-          <label class="field" for="ytServer">YouTube 伺服器網址(Render)</label>
-          <input type="text" id="ytServer" placeholder="https://transcribe-yt-xxxx.onrender.com" autocomplete="off">
-          <p class="hint">供「貼上 YouTube 網址」功能使用,填一次會自動記住。部署方式見 repo 內的 server/README.md(免費方案即可)。</p>
+          <label class="field" for="ytServer">YouTube 伺服器網址(選填,留白使用內建伺服器)</label>
+          <input type="text" id="ytServer" placeholder="留白 = 使用內建伺服器" autocomplete="off">
+          <p class="hint">一般不需填寫。想使用自己架設的伺服器時才填(部署方式見 repo 內的 server/README.md),填一次會自動記住。</p>
         </div>
         <div>
           <label class="field" for="vocab">詞庫(自動儲存於此裝置)</label>
@@ -383,6 +383,8 @@
 <script>
 (function(){
   var DEFAULT_VOCAB='輿情, 行政院, 災害防救, 新聞稿, 記者會, 質詢, 陳情, 簽呈, 公文, 府會聯絡, 局處, 科長, 專門委員, 參事, 主任秘書';
+  /* 站長內建的 YouTube 伺服器網址:填入後所有訪客零設定直接可用(進階選項可個別覆蓋) */
+  var DEFAULT_YT_SERVER=(typeof window.__DEFAULT_YT_SERVER==='string')?window.__DEFAULT_YT_SERVER:'';
   var SIZE_LIMIT=25*1024*1024;
   var CHUNK_SEC=600; /* 每段約 10 分鐘(16kHz 單聲道 WAV 約 19 MB) */
   var files=[];
@@ -447,7 +449,10 @@
   });
   $('ytServer').value=read('tw_ytserver')||'';
   $('ytServer').addEventListener('input',function(){store('tw_ytserver',this.value.trim());});
-  function ytServer(){return ($('ytServer').value||'').trim().replace(/\/+$/,'');}
+  function ytServer(){
+    var custom=($('ytServer').value||'').trim().replace(/\/+$/,'');
+    return custom||DEFAULT_YT_SERVER.replace(/\/+$/,'');
+  }
   function srvErrMsg(t){try{return JSON.parse(t).detail||null;}catch(e){return null;}}
 
   /* ---------- YouTube 來源 ---------- */
@@ -460,7 +465,7 @@
     var srv=ytServer();
     if(!srv){
       $('adv').open=true;$('ytServer').focus();
-      setAlert('請先在「進階選項」填入 YouTube 伺服器網址(部署方式見 server/README.md)。','err');return;
+      setAlert('YouTube 功能尚未啟用:需先部署伺服器並設定網址(部署方式見 server/README.md),或在「進階選項」填入自架伺服器網址。','err');return;
     }
     var b=this;b.disabled=true;b.textContent='查詢中…';
     setAlert('正在查詢影片資訊……若伺服器休眠中,喚醒可能需要 30–60 秒,請耐心等候。','ok');
