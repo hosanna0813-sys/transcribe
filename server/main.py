@@ -40,6 +40,31 @@ _rate_lock = threading.Lock()
 _rate_hits: dict = defaultdict(deque)     # (bucket, ip) -> deque[timestamp]
 _audio_slots = threading.Semaphore(2)     # 同時最多 2 個下載工作
 
+# 同請求去重:瀏覽器對久跑的 /audio 會在 300 秒斷線重試(Chrome 硬限制),
+# 重試必須「接上」進行中的下載,而不是再開一份重複下載互搶頻寬。
+# 暫存目錄用引用計數清理:所有回應送完即刪,維持零保存原則。
+_jobs_lock = threading.Lock()
+_jobs: dict = {}                          # (url, start, end) -> _AudioJob
+
+
+class _AudioJob:
+    def __init__(self):
+        self.done = threading.Event()
+        self.path: str | None = None
+        self.error: HTTPException | None = None
+        self.tmpdir = tempfile.mkdtemp(prefix="ytaudio-")
+        self.refs = 0
+
+
+def _job_release(key, job: "_AudioJob"):
+    with _jobs_lock:
+        job.refs -= 1
+        last = job.refs <= 0
+        if last:
+            _jobs.pop(key, None)
+    if last:
+        shutil.rmtree(job.tmpdir, ignore_errors=True)
+
 
 def client_ip(request: Request) -> str:
     fwd = request.headers.get("x-forwarded-for", "")
@@ -204,18 +229,47 @@ def audio(
     elif clip_len > MAX_CLIP_SEC:
         raise HTTPException(400, "截取片段超過 2 小時上限,請縮短範圍")
 
-    if not _audio_slots.acquire(blocking=False):
-        raise HTTPException(429, "伺服器忙碌中(同時處理數已滿),請稍候一分鐘再試")
-    tmpdir = tempfile.mkdtemp(prefix="ytaudio-")
-    try:
-        resp = _fetch_and_transcode(url, tmpdir, start, end)
-    except Exception:
-        # 任何失敗都立即清掉暫存,不讓檔案留在伺服器上
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        _audio_slots.release()
-        raise
-    _audio_slots.release()
-    return resp
+    # 同請求去重:第一個請求是「擁有者」負責下載;瀏覽器 300 秒斷線後的
+    # 自動重試會以「等待者」身分接上同一份工作,不再重複下載互搶頻寬
+    key = (url, start, end)
+    with _jobs_lock:
+        job = _jobs.get(key)
+        owner = job is None
+        if owner:
+            job = _AudioJob()
+            _jobs[key] = job
+        job.refs += 1
+
+    if owner:
+        if not _audio_slots.acquire(blocking=False):
+            job.error = HTTPException(429, "伺服器忙碌中(同時處理數已滿),請稍候一分鐘再試")
+            job.done.set()
+        else:
+            try:
+                job.path = _fetch_and_transcode(url, job.tmpdir, start, end)
+            except HTTPException as e:
+                job.error = e
+            except Exception as e:
+                job.error = HTTPException(502, f"下載音訊失敗:{str(e)[:200]}")
+            finally:
+                _audio_slots.release()
+                job.done.set()
+    else:
+        if not job.done.wait(timeout=900):
+            _job_release(key, job)
+            raise HTTPException(504, "音訊處理逾時,請稍後再試")
+
+    if job.error is not None:
+        err = job.error
+        _job_release(key, job)
+        raise err
+    # 回應送出後由引用計數清理:最後一個回應送完即刪整個暫存目錄
+    return FileResponse(
+        job.path,
+        media_type="audio/mp4",
+        filename="youtube_audio.m4a",
+        background=BackgroundTask(_job_release, key, job),
+    )
 
 
 def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float | None):
@@ -223,6 +277,8 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
         "format": "bestaudio[abr<=96]/bestaudio/best",
         "outtmpl": os.path.join(tmpdir, "src.%(ext)s"),
         "max_filesize": MAX_FILE_BYTES,
+        # 直播存檔等分段格式常被 YouTube 限速,開 8 線並行下載分段
+        "concurrent_fragment_downloads": 8,
     })
 
     def _cleanup_partial():
@@ -236,8 +292,11 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
     already_clipped = False
     if want_clip:
         # 先試片段下載(只抓需要的範圍,最省流量);此模式由 ffmpeg 直連
-        # YouTube 媒體網址,部分機房 IP 會被 403 拒絕,失敗就改走完整下載
+        # YouTube 媒體網址,部分機房 IP 會被 403 拒絕,失敗就改走完整下載。
+        # 只對「漸進式 https 格式」嘗試:直播存檔只有分段 DASH 格式,
+        # ffmpeg 直連必被拒(exit 183),限定格式讓它秒級失敗直接走完整下載
         sec_opts = dict(base_opts)
+        sec_opts["format"] = "bestaudio[protocol=https][abr<=96]/bestaudio[protocol=https]"
         sec_opts["download_ranges"] = download_range_func(
             None, [(start or 0, end if end is not None else float("inf"))]
         )
@@ -297,10 +356,4 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
     if os.path.getsize(out) > MAX_FILE_BYTES:
         raise HTTPException(413, "音訊超過 100 MB 上限,請用起訖時間縮短範圍")
 
-    # 回應送出後立即刪除整個暫存目錄(附掛在 Response 上才會確實執行)
-    return FileResponse(
-        out,
-        media_type="audio/mp4",
-        filename="youtube_audio.m4a",
-        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
-    )
+    return out
