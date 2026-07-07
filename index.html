@@ -386,7 +386,8 @@
   /* 站長內建的 YouTube 伺服器清單(依優先序,連不上自動換下一台;進階選項可個別覆蓋)
      首位放家用中繼站(住宅 IP,免驗證),Render 作為備援 */
   var DEFAULT_YT_SERVERS=(window.__DEFAULT_YT_SERVERS instanceof Array)?window.__DEFAULT_YT_SERVERS:[
-    'https://transcribe-yt-j7kv.onrender.com'
+    'https://woof-stand-rectify.ngrok-free.dev',   // 家用中繼站(住宅 IP,免驗證)
+    'https://transcribe-yt-j7kv.onrender.com'      // Render 備援
   ];
   var SIZE_LIMIT=25*1024*1024;
   var CHUNK_SEC=600; /* 每段約 10 分鐘(16kHz 單聲道 WAV 約 19 MB) */
@@ -464,7 +465,8 @@
     var servers=ytServers();
     if(!servers.length)return Promise.reject(new Error('尚未設定 YouTube 伺服器網址,請到「進階選項」填入。'));
     function tryAt(i){
-      return fetchRetry(servers[i]+path,{}).then(function(res){
+      /* ngrok-skip-browser-warning:繞過 ngrok 免費版對瀏覽器請求插入的警告頁 */
+      return fetchRetry(servers[i]+path,{headers:{'ngrok-skip-browser-warning':'1'}}).then(function(res){
         if(res.ok)return res;
         return res.text().then(function(t){
           var e=new Error(srvErrMsg(t)||('伺服器回應錯誤(HTTP '+res.status+')'));
