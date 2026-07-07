@@ -104,9 +104,10 @@
   .drop small{font-size:.76rem;display:block;margin-top:2px}
   #fileList{list-style:none;margin-top:10px}
   #fileList li{
-    display:flex;align-items:center;gap:8px;border:1px solid var(--line);
+    border:1px solid var(--line);
     border-radius:var(--radius-s);padding:9px 11px;margin-bottom:6px;font-size:.86rem;
   }
+  #fileList .row-main{display:flex;align-items:center;gap:8px}
   #fileList .no{color:var(--accent);font-weight:700;min-width:1.3em;font-size:.8rem}
   #fileList .nm{flex:1;word-break:break-all;line-height:1.4;min-width:0}
   #fileList .sz{color:var(--muted);font-size:.75rem;white-space:nowrap}
@@ -117,6 +118,19 @@
   }
   #fileList button:hover{border-color:var(--accent);color:var(--accent)}
   #fileList button:disabled{opacity:.3;cursor:default}
+  #fileList .trim-toggle{width:auto;padding:0 9px;font-size:.72rem;letter-spacing:.05em}
+  #fileList .trim-toggle.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+  .yt-badge{background:#E33;color:#fff;font-size:.62rem;padding:1px 6px;border-radius:4px;font-weight:700;flex:none;letter-spacing:.03em}
+  .trim-row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding-top:9px;margin-top:9px;border-top:1px dashed var(--line)}
+  .trim-row label{display:flex;align-items:center;gap:6px;font-size:.76rem;color:var(--muted);margin:0}
+  .trim-row input{width:92px;padding:6px 8px;font-size:.85rem}
+  .trim-msg{font-size:.74rem;color:var(--muted)}
+  .trim-msg.err{color:var(--err)}
+  .yt-add{margin-top:16px}
+  .yt-add .field{display:block;font-size:.8rem;color:var(--muted);margin-bottom:5px}
+  .yt-row{display:flex;gap:8px}
+  .yt-row input{flex:1;min-width:0}
+  .yt-row button{flex:none}
 
   /* ---------- 進階選項 ---------- */
   details.adv{border-top:1px solid var(--line)}
@@ -271,6 +285,14 @@
       </div>
       <input type="file" id="fileInput" accept="audio/*,video/mp4,video/webm,.m4a,.mp3,.wav,.aac,.flac,.ogg,.mp4,.webm,.mpeg,.mpga" multiple hidden>
       <ul id="fileList"></ul>
+      <div class="yt-add">
+        <label class="field" for="ytUrl">或貼上 YouTube 網址</label>
+        <div class="yt-row">
+          <input type="text" id="ytUrl" placeholder="https://www.youtube.com/watch?v=..." inputmode="url" autocomplete="off">
+          <button class="ghost" id="ytAddBtn" type="button">加入</button>
+        </div>
+        <p class="hint">加入後可在清單中按「截取」設定起訖時間。此功能需先部署伺服器並在「進階選項」填入網址(<a href="https://github.com/hosanna0813-sys/transcribe/blob/main/server/README.md" target="_blank" rel="noopener">部署說明 ↗</a>)。</p>
+      </div>
     </section>
 
     <details class="adv" id="adv">
@@ -293,6 +315,11 @@
             <option value="gpt-4o-mini" selected>gpt-4o-mini(便宜,建議)</option>
             <option value="gpt-4o">gpt-4o(較準,較貴)</option>
           </select>
+        </div>
+        <div>
+          <label class="field" for="ytServer">YouTube 伺服器網址(Render)</label>
+          <input type="text" id="ytServer" placeholder="https://transcribe-yt-xxxx.onrender.com" autocomplete="off">
+          <p class="hint">供「貼上 YouTube 網址」功能使用,填一次會自動記住。部署方式見 repo 內的 server/README.md(免費方案即可)。</p>
         </div>
         <div>
           <label class="field" for="vocab">詞庫(自動儲存於此裝置)</label>
@@ -418,6 +445,40 @@
   $('vocabReset').addEventListener('click',function(){
     $('vocab').value=DEFAULT_VOCAB;store('tw_vocab',DEFAULT_VOCAB);
   });
+  $('ytServer').value=read('tw_ytserver')||'';
+  $('ytServer').addEventListener('input',function(){store('tw_ytserver',this.value.trim());});
+  function ytServer(){return ($('ytServer').value||'').trim().replace(/\/+$/,'');}
+  function srvErrMsg(t){try{return JSON.parse(t).detail||null;}catch(e){return null;}}
+
+  /* ---------- YouTube 來源 ---------- */
+  $('ytAddBtn').addEventListener('click',function(){
+    var url=$('ytUrl').value.trim();
+    if(!url)return;
+    if(!/^https?:\/\/(www\.|m\.|music\.)?(youtube\.com\/|youtu\.be\/)/i.test(url)){
+      setAlert('這看起來不是 YouTube 網址,請確認後再試。','err');return;
+    }
+    var srv=ytServer();
+    if(!srv){
+      $('adv').open=true;$('ytServer').focus();
+      setAlert('請先在「進階選項」填入 YouTube 伺服器網址(部署方式見 server/README.md)。','err');return;
+    }
+    var b=this;b.disabled=true;b.textContent='查詢中…';
+    setAlert('正在查詢影片資訊……若伺服器休眠中,喚醒可能需要 30–60 秒,請耐心等候。','ok');
+    fetchRetry(srv+'/info?url='+encodeURIComponent(url),{}).then(function(res){
+      if(!res.ok)return res.text().then(function(t){throw new Error(srvErrMsg(t)||('伺服器回應錯誤(HTTP '+res.status+')'));});
+      return res.json();
+    }).then(function(d){
+      files.push({kind:'yt',url:url,name:d.title||'YouTube 影片',duration:d.duration||0,
+        mustTrim:!!d.too_long,startStr:'',endStr:'',start:null,end:null,trimOpen:!!d.too_long,trimErr:''});
+      $('ytUrl').value='';
+      if(d.too_long)setAlert('影片超過 3 小時,請在清單中設定起訖時間,只轉錄需要的片段。','err');
+      else setAlert('');
+      renderList();updateSteps();
+    }).catch(function(err){
+      setAlert(escapeHtml(err.message)+' 若伺服器剛從休眠喚醒,請稍候幾秒再按一次「加入」。','err');
+    }).finally(function(){b.disabled=false;b.textContent='加入';});
+  });
+  $('ytUrl').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();$('ytAddBtn').click();}});
 
   /* ---------- 多檔選擇與排序 ---------- */
   drop.addEventListener('click',function(){fileInput.click();});
@@ -431,7 +492,7 @@
     var rejected=[];
     Array.prototype.forEach.call(list,function(f){
       if(f.size>800*1024*1024){rejected.push(f.name);return;}
-      files.push(f);
+      files.push({kind:'file',file:f,name:f.name,size:f.size,startStr:'',endStr:'',start:null,end:null,trimOpen:false,trimErr:''});
     });
     renderList();
     if(rejected.length)setAlert('以下檔案超過 800 MB,瀏覽器無法處理,未加入:'+escapeHtml(rejected.join('、'))+'。請先用電腦分段。','err');
@@ -440,16 +501,24 @@
   }
   function renderList(){
     var ul=$('fileList');ul.innerHTML='';
-    files.forEach(function(f,i){
+    files.forEach(function(en,i){
       var li=document.createElement('li');
-      var tag=f.size>SIZE_LIMIT?' <span class="split-tag">(將自動切分)</span>':'';
-      li.innerHTML='<span class="no">'+(i+1)+'</span>'+
-        '<span class="nm">'+escapeHtml(f.name)+tag+'</span>'+
-        '<span class="sz">'+(f.size/1048576).toFixed(1)+' MB</span>';
+      var main=document.createElement('div');main.className='row-main';
+      var badge=en.kind==='yt'?'<span class="yt-badge">YT</span>':'';
+      var szTxt=en.kind==='yt'?(en.duration?fmtDur(en.duration):''):(en.size/1048576).toFixed(1)+' MB';
+      var tag=(en.kind==='file'&&en.size>SIZE_LIMIT)?' <span class="split-tag">(將自動切分)</span>':'';
+      main.innerHTML='<span class="no">'+(i+1)+'</span>'+badge+
+        '<span class="nm">'+escapeHtml(en.name)+tag+'</span>'+
+        '<span class="sz">'+szTxt+'</span>';
+      var trimSet=en.start!=null||en.end!=null;
+      var tr=btn('截取','設定只轉錄的起訖時間',false,function(){en.trimOpen=!en.trimOpen;renderList();});
+      tr.className='trim-toggle'+((en.trimOpen||trimSet)?' on':'');
       var up=btn('▲','往前移',i===0,function(){swap(i,i-1);});
       var dn=btn('▼','往後移',i===files.length-1,function(){swap(i,i+1);});
       var rm=btn('✕','移除',false,function(){files.splice(i,1);renderList();updateSteps();});
-      li.appendChild(up);li.appendChild(dn);li.appendChild(rm);
+      main.appendChild(tr);main.appendChild(up);main.appendChild(dn);main.appendChild(rm);
+      li.appendChild(main);
+      if(en.trimOpen)li.appendChild(trimRow(en));
       ul.appendChild(li);
     });
     function btn(t,label,disabled,fn){
@@ -458,6 +527,29 @@
       b.disabled=disabled;b.addEventListener('click',fn);return b;
     }
     function swap(a,b){var t=files[a];files[a]=files[b];files[b]=t;renderList();}
+  }
+  /* 起訖時間輸入列(本機檔與 YT 共用;留白 = 從頭 / 到尾) */
+  function trimRow(en){
+    var row=document.createElement('div');row.className='trim-row';
+    row.innerHTML='<label>起點 <input type="text" class="t-start" placeholder="0:00" autocomplete="off"></label>'+
+      '<label>終點 <input type="text" class="t-end" placeholder="到結尾" autocomplete="off"></label>'+
+      '<span class="trim-msg"></span>';
+    var si=row.querySelector('.t-start'),ei=row.querySelector('.t-end'),msg=row.querySelector('.trim-msg');
+    si.value=en.startStr;ei.value=en.endStr;
+    function upd(){
+      en.startStr=si.value;en.endStr=ei.value;
+      var ps=parseTimeInput(si.value),pe=parseTimeInput(ei.value);
+      if(!ps.ok||!pe.ok){en.trimErr='時間格式錯誤,請用 秒、分:秒 或 時:分:秒';en.start=null;en.end=null;}
+      else if(ps.sec!=null&&pe.sec!=null&&pe.sec<=ps.sec){en.trimErr='終點必須大於起點';en.start=null;en.end=null;}
+      else if(en.duration&&(ps.sec||0)>=en.duration){en.trimErr='起點超過音訊長度('+fmtDur(en.duration)+')';en.start=null;en.end=null;}
+      else{en.trimErr='';en.start=ps.sec;en.end=pe.sec;}
+      if(en.trimErr){msg.textContent=en.trimErr;msg.className='trim-msg err';}
+      else if(en.start!=null||en.end!=null){msg.textContent='將只轉錄 '+(en.start!=null?fmtDur(en.start):'開頭')+' – '+(en.end!=null?fmtDur(en.end):'結尾');msg.className='trim-msg';}
+      else{msg.textContent='留白 = 轉錄整段';msg.className='trim-msg';}
+    }
+    si.addEventListener('input',upd);ei.addEventListener('input',upd);
+    upd();
+    return row;
   }
 
   /* ---------- 進度顯示 ---------- */
@@ -513,6 +605,27 @@
     var sec=Math.round(ms/1000);
     if(sec<60)return sec+' 秒';
     return Math.floor(sec/60)+' 分 '+(sec%60)+' 秒';
+  }
+  function fmtDur(sec){
+    sec=Math.round(sec);
+    var h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60;
+    function p(n){return (n<10?'0':'')+n;}
+    return h?h+':'+p(m)+':'+p(s):m+':'+p(s);
+  }
+  /* 解析使用者輸入的時間:'90'(秒)、'5:30'、'1:05:30',支援全形冒號;空字串回 sec:null */
+  function parseTimeInput(str){
+    str=(str||'').replace(/：/g,':').trim();
+    if(!str)return {ok:true,sec:null};
+    var m=str.match(/^(\d+)(?::([0-5]?\d))?(?::([0-5]?\d))?$/);
+    if(!m)return {ok:false};
+    var a=parseInt(m[1],10);
+    var b=m[2]!==undefined?parseInt(m[2],10):null;
+    var c=m[3]!==undefined?parseInt(m[3],10):null;
+    var sec;
+    if(c!==null)sec=a*3600+b*60+c;
+    else if(b!==null)sec=a*60+b;
+    else sec=a;
+    return {ok:true,sec:sec};
   }
 
   /* ---------- 共用:等待、自動重試、限量並行 ---------- */
@@ -593,18 +706,58 @@
     return new Blob([buf],{type:'audio/wav'});
   }
 
-  function splitFile(f){
-    P.sub='解碼與切分大檔中……(大檔可能需要數分鐘,請勿關閉頁面)';progRender();
-    return decodeToMono16k(f).then(function(rendered){
+  function samplesToParts(data){
+    var per=16000*CHUNK_SEC, parts=[];
+    for(var i=0;i<data.length;i+=per){
+      var slice=data.subarray(i,Math.min(i+per,data.length));
+      parts.push({blob:wavBlob(slice,16000),dur:slice.length/16000});
+    }
+    return parts;
+  }
+
+  /* 解碼音訊 →(可選)依起訖秒數截取 → 依 CHUNK_SEC 切分 */
+  function decodeAndSlice(fileOrBlob,name,startSec,endSec){
+    var trimming=(startSec!=null||endSec!=null);
+    P.sub=trimming?'解碼與截取音訊中……':'解碼與切分大檔中……(大檔可能需要數分鐘,請勿關閉頁面)';
+    progRender();
+    return decodeToMono16k(fileOrBlob).then(function(rendered){
       var data=rendered.getChannelData(0);
-      var per=16000*CHUNK_SEC, parts=[];
-      for(var i=0;i<data.length;i+=per){
-        var slice=data.subarray(i,Math.min(i+per,data.length));
-        parts.push({blob:wavBlob(slice,16000),dur:slice.length/16000});
-      }
-      return parts;
+      var s=Math.min(Math.floor((startSec||0)*16000),data.length);
+      var e=endSec!=null?Math.min(Math.ceil(endSec*16000),data.length):data.length;
+      if(e<=s)throw new Error('TRIM_RANGE:截取範圍超出音檔長度(音檔共 '+fmtDur(data.length/16000)+'),請調整「'+name+'」的起訖時間。');
+      return samplesToParts(data.subarray(s,e));
     }).catch(function(err){
-      throw new Error('無法解碼「'+f.name+'」:'+(err&&err.message?err.message:'格式可能不受支援(如 amr/3gp)')+'。請先轉成 mp3 或 m4a 再上傳。');
+      if(err&&err.message&&err.message.indexOf('TRIM_RANGE:')===0)throw new Error(err.message.slice(11));
+      throw new Error('無法解碼「'+name+'」:'+(err&&err.message?err.message:'格式可能不受支援(如 amr/3gp)')+'。請先轉成 mp3 或 m4a 再上傳。');
+    });
+  }
+
+  /* 多個切分段並行轉錄(每段時間偏移事先算好,結果依原順序合併) */
+  function transcribeParts(key,parts,offset,useTime){
+    var offsets=[],off=offset,total=0;
+    parts.forEach(function(p){offsets.push(off);off+=p.dur;total+=p.dur;});
+    P.segDone=0;P.segCount=parts.length;P.sub='';progRender();
+    return pool(parts,3,function(p,j){
+      return transcribeBlob(key,p.blob,'part'+(j+1)+'.wav',offsets[j],useTime).then(function(r){
+        P.segDone++;progRender();
+        return r.text;
+      });
+    }).then(function(texts){
+      return {text:texts.join('\n\n'),duration:total};
+    });
+  }
+
+  /* 從 Render 後端下載 YouTube 音訊(伺服器端已完成起訖截取與壓縮) */
+  function fetchYtAudio(en){
+    var srv=ytServer();
+    if(!srv)return Promise.reject(new Error('尚未設定 YouTube 伺服器網址,請到「進階選項」填入。'));
+    P.segDone=0;P.segCount=1;P.sub='下載 YouTube 音訊中……(伺服器休眠時喚醒需 30–60 秒)';progRender();
+    var q=srv+'/audio?url='+encodeURIComponent(en.url);
+    if(en.start!=null)q+='&start='+en.start;
+    if(en.end!=null)q+='&end='+en.end;
+    return fetchRetry(q,{}).then(function(res){
+      if(!res.ok)return res.text().then(function(t){throw new Error(srvErrMsg(t)||('下載 YouTube 音訊失敗(HTTP '+res.status+')'));});
+      return res.blob();
     });
   }
 
@@ -643,24 +796,31 @@
     });
   }
 
-  function transcribeOne(key,f,offset,useTime){
-    if(f.size<=SIZE_LIMIT){
-      P.segDone=0;P.segCount=1;P.sub='上傳與辨識中……';progRender();
-      return transcribeBlob(key,f,f.name,offset,useTime);
-    }
-    /* 大檔:切分後並行轉錄(每段時間偏移事先算好,結果依原順序合併) */
-    return splitFile(f).then(function(parts){
-      var offsets=[],off=offset,total=0;
-      parts.forEach(function(p){offsets.push(off);off+=p.dur;total+=p.dur;});
-      P.segDone=0;P.segCount=parts.length;P.sub='';progRender();
-      return pool(parts,3,function(p,j){
-        return transcribeBlob(key,p.blob,'part'+(j+1)+'.wav',offsets[j],useTime).then(function(r){
-          P.segDone++;progRender();
-          return r.text;
+  function transcribeOne(key,en,offset,useTime){
+    if(en.kind==='yt'){
+      return fetchYtAudio(en).then(function(blob){
+        if(blob.size<=SIZE_LIMIT){
+          P.segDone=0;P.segCount=1;P.sub='上傳與辨識中……';progRender();
+          return transcribeBlob(key,blob,'youtube.m4a',offset,useTime);
+        }
+        return decodeAndSlice(blob,en.name,null,null).then(function(parts){
+          return transcribeParts(key,parts,offset,useTime);
         });
-      }).then(function(texts){
-        return {text:texts.join('\n\n'),duration:total};
       });
+    }
+    var hasTrim=en.start!=null||en.end!=null;
+    if(hasTrim){
+      /* 有截取:一律解碼後切片,只轉錄選定範圍 */
+      return decodeAndSlice(en.file,en.name,en.start,en.end).then(function(parts){
+        return transcribeParts(key,parts,offset,useTime);
+      });
+    }
+    if(en.size<=SIZE_LIMIT){
+      P.segDone=0;P.segCount=1;P.sub='上傳與辨識中……';progRender();
+      return transcribeBlob(key,en.file,en.name,offset,useTime);
+    }
+    return decodeAndSlice(en.file,en.name,null,null).then(function(parts){
+      return transcribeParts(key,parts,offset,useTime);
     });
   }
 
@@ -746,6 +906,13 @@
   goBtn.addEventListener('click',function(){
     var key=$('apiKey').value.trim();
     if(!key||!files.length)return;
+    for(var i=0;i<files.length;i++){
+      var en=files[i];
+      if(en.trimErr){setAlert('第 '+(i+1)+' 個項目的起訖時間有誤:'+escapeHtml(en.trimErr),'err');return;}
+      if(en.kind==='yt'&&en.mustTrim&&en.start==null&&en.end==null){
+        setAlert('「'+escapeHtml(en.name)+'」超過 3 小時,請按該項目的「截取」設定起訖時間後再開始。','err');return;
+      }
+    }
     goBtn.disabled=true;
     goBtn.textContent='處理中……';
     rawText='';fixedText='';
@@ -847,6 +1014,9 @@
     document.body.appendChild(a);a.click();document.body.removeChild(a);
     setTimeout(function(){URL.revokeObjectURL(a.href);},1000);
   }
+
+  /* 自動化測試掛鉤(不影響一般使用) */
+  window.__test={parseTimeInput:parseTimeInput,fmtDur:fmtDur};
 })();
 </script>
 </body>
