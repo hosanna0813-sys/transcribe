@@ -29,10 +29,22 @@
   - 只接受來自本工具網頁(hosanna0813-sys.github.io)的瀏覽器請求(CORS)
 - **限制**:整部影片上限 3 小時;截取片段上限 2 小時;單一請求音訊上限 100 MB
 
+## YouTube 機器人驗證解法(cookies)
+
+YouTube 常對雲端機房 IP 顯示「Sign in to confirm you're not a bot」。程式已內建兩層突破:先自動改用 tv 播放器客戶端重試;若仍被擋,最可靠的解法是提供 cookies:
+
+1. 用瀏覽器(建議無痕視窗)登入一個**拋棄式 Google 帳號**——不要用你的主帳號,理論上帳號有被 YouTube 停用的風險——然後打開 youtube.com
+2. 安裝瀏覽器擴充功能「**Get cookies.txt LOCALLY**」(Chrome/Edge 商店搜尋得到)
+3. 在 youtube.com 頁面點擴充功能圖示 → **Export**,會下載一個 `cookies.txt`
+4. 到 [Render Dashboard](https://dashboard.render.com/) → 你的 `transcribe-yt` 服務 → **Environment** 分頁 → **Secret Files** → **Add Secret File**:
+   - Filename 填:`cookies.txt`
+   - Contents 貼上剛才下載檔案的全部內容
+   - 按 **Save Changes**(會自動重新部署,約 1–2 分鐘)
+5. 完成。cookies 若數週後失效(再度出現驗證訊息),重複以上步驟更新即可
+
 ## 注意事項
 
 - **免費方案會休眠**:閒置 15 分鐘後服務會睡著,下一次使用的第一個請求需要等 30–60 秒喚醒,工具會顯示提示,稍等或再按一次即可。
-- **YouTube 偶爾會擋雲端伺服器**:若出現「下載音訊失敗:Sign in to confirm…」之類的訊息,表示 YouTube 暫時要求該伺服器驗證身分。通常過一段時間會恢復;若長期發生,可在 Render 服務加入 cookies 檔(進階做法,需要時再詢問)。
 - 片段下載被拒時會自動改抓完整音訊、在伺服器本地截取後回傳,使用者無感。
 
 ## API(前端自動使用,一般不需手動呼叫)

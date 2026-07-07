@@ -84,14 +84,42 @@ def check_url(url: str) -> None:
         raise HTTPException(400, "請提供有效的 YouTube 影片網址")
 
 
+# YouTube 對機房 IP 常要求登入驗證。兩層突破:
+# 1. cookies:Render Secret File 掛載於 /etc/secrets/cookies.txt(最可靠)
+# 2. tv 播放器客戶端:被驗證擋下時自動改用 tv client 重試(常可避開)
+COOKIES_FILE = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
+BOT_MSG = "YouTube 要求伺服器驗證身分,暫時無法存取。站長可依 server/README.md 加入 cookies 解決。"
+
+
+def _bot_blocked(msg: str) -> bool:
+    return "Sign in to confirm" in msg or "not a bot" in msg
+
+
+def _ydl_base(extra: dict | None = None, client: list | None = None) -> dict:
+    opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "socket_timeout": 30}
+    if os.path.exists(COOKIES_FILE):
+        opts["cookiefile"] = COOKIES_FILE
+    if client:
+        opts["extractor_args"] = {"youtube": {"player_client": client}}
+    if extra:
+        opts.update(extra)
+    return opts
+
+
 def probe(url: str) -> dict:
-    opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True}
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception as e:
-        raise HTTPException(502, f"無法讀取影片資訊:{str(e)[:200]}")
-    return info
+    last = ""
+    for client in (None, ["tv"]):
+        opts = _ydl_base({"skip_download": True}, client)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        except Exception as e:
+            last = str(e)
+            if not _bot_blocked(last):
+                break
+    if _bot_blocked(last):
+        raise HTTPException(502, BOT_MSG)
+    raise HTTPException(502, f"無法讀取影片資訊:{last[:200]}")
 
 
 @app.get("/healthz")
@@ -149,15 +177,11 @@ def audio(
 
 
 def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float | None):
-    base_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
+    base_opts = _ydl_base({
         "format": "bestaudio[abr<=96]/bestaudio/best",
         "outtmpl": os.path.join(tmpdir, "src.%(ext)s"),
         "max_filesize": MAX_FILE_BYTES,
-        "socket_timeout": 30,
-    }
+    })
 
     def _cleanup_partial():
         for p in glob.glob(os.path.join(tmpdir, "src.*")):
@@ -183,11 +207,25 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
             _cleanup_partial()
 
     if not already_clipped:
-        try:
-            with yt_dlp.YoutubeDL(base_opts) as ydl:
-                ydl.download([url])
-        except Exception as e:
-            raise HTTPException(502, f"下載音訊失敗:{str(e)[:200]}")
+        last = None
+        for client in (None, ["tv"]):
+            opts = dict(base_opts)
+            if client:
+                opts["extractor_args"] = {"youtube": {"player_client": client}}
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([url])
+                last = None
+                break
+            except Exception as e:
+                last = str(e)
+                _cleanup_partial()
+                if not _bot_blocked(last):
+                    break
+        if last is not None:
+            if _bot_blocked(last):
+                raise HTTPException(502, BOT_MSG)
+            raise HTTPException(502, f"下載音訊失敗:{last[:200]}")
 
     srcs = glob.glob(os.path.join(tmpdir, "src.*"))
     if not srcs:
