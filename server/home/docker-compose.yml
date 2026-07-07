@@ -1,0 +1,16 @@
+# 家用中繼站(Docker 沙箱版)
+# 使用方式:複製 .env.example 為 .env 填入兩個值,然後執行 docker compose up -d
+services:
+  transcribe:
+    build: ..                # 使用 server/ 的 Dockerfile(與 Render 相同)
+    restart: unless-stopped  # 電腦重開後自動復活
+    # 刻意不開放任何主機埠:只有下面的 ngrok 容器透過內部網路連得到它
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    depends_on:
+      - transcribe
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    command: http transcribe:10000 --domain=${NGROK_DOMAIN}
