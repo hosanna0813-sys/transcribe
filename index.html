@@ -126,6 +126,19 @@
   .trim-row input{width:92px;padding:6px 8px;font-size:.85rem}
   .trim-msg{font-size:.74rem;color:var(--muted)}
   .trim-msg.err{color:var(--err)}
+  .yt-preview{width:100%;margin-top:2px}
+  .yt-preview-frame{position:relative;width:100%;max-width:360px;aspect-ratio:16/9;
+    background:#000;border-radius:var(--radius-s);overflow:hidden}
+  .yt-preview-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+  .yt-preview-frame .yt-preview-loading{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    color:#fff;font-size:.78rem;opacity:.7}
+  .yt-preview-actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+  .yt-preview-actions button{
+    flex:none;padding:6px 12px;font-size:.76rem;border:1px solid var(--line);
+    border-radius:var(--radius-s);background:var(--card);color:var(--ink);cursor:pointer;
+  }
+  .yt-preview-actions button:hover{border-color:var(--accent);color:var(--accent)}
   .yt-add{margin-top:16px}
   .yt-add .field{display:block;font-size:.8rem;color:var(--muted);margin-bottom:5px}
   .yt-row{display:flex;gap:8px}
@@ -529,7 +542,9 @@
     updateSteps();
   }
   function renderList(){
-    var ul=$('fileList');ul.innerHTML='';
+    var ul=$('fileList');
+    files.forEach(function(en){destroyPreview(en);});  // 整份重繪前先釋放舊的播放器,避免殘留
+    ul.innerHTML='';
     files.forEach(function(en,i){
       var li=document.createElement('li');
       var main=document.createElement('div');main.className='row-main';
@@ -544,7 +559,7 @@
       tr.className='trim-toggle'+((en.trimOpen||trimSet)?' on':'');
       var up=btn('▲','往前移',i===0,function(){swap(i,i-1);});
       var dn=btn('▼','往後移',i===files.length-1,function(){swap(i,i+1);});
-      var rm=btn('✕','移除',false,function(){files.splice(i,1);renderList();updateSteps();});
+      var rm=btn('✕','移除',false,function(){destroyPreview(en);files.splice(i,1);renderList();updateSteps();});
       main.appendChild(tr);main.appendChild(up);main.appendChild(dn);main.appendChild(rm);
       li.appendChild(main);
       if(en.trimOpen)li.appendChild(trimRow(en));
@@ -578,6 +593,46 @@
     }
     si.addEventListener('input',upd);ei.addEventListener('input',upd);
     upd();
+
+    if(en.kind==='yt'){
+      var pv=document.createElement('div');pv.className='yt-preview';
+      var frame=document.createElement('div');frame.className='yt-preview-frame';
+      var loading=document.createElement('div');loading.className='yt-preview-loading';loading.textContent='載入播放器中…';
+      frame.appendChild(loading);
+      var actions=document.createElement('div');actions.className='yt-preview-actions';
+      var setStart=document.createElement('button');setStart.type='button';setStart.textContent='設為起點';setStart.disabled=true;
+      var setEnd=document.createElement('button');setEnd.type='button';setEnd.textContent='設為終點';setEnd.disabled=true;
+      actions.appendChild(setStart);actions.appendChild(setEnd);
+      pv.appendChild(frame);pv.appendChild(actions);
+      row.appendChild(pv);
+
+      var vid=ytVideoId(en.url);
+      if(vid){
+        var mountId='ytpv-'+Math.random().toString(36).slice(2);
+        var mount=document.createElement('div');mount.id=mountId;
+        frame.appendChild(mount);
+        ytApiReady(function(){
+          if(!frame.isConnected)return;  // 使用者可能已切走/關閉此列
+          en._player=new YT.Player(mountId,{
+            videoId:vid,
+            playerVars:{rel:0},
+            events:{onReady:function(){
+              loading.style.display='none';
+              setStart.disabled=false;setEnd.disabled=false;
+            }}
+          });
+        });
+      }else{
+        loading.textContent='無法辨識影片網址,無法預覽';
+      }
+      function applyTime(input){
+        if(!en._player)return;
+        input.value=fmtDur(en._player.getCurrentTime());
+        upd();
+      }
+      setStart.addEventListener('click',function(){applyTime(si);});
+      setEnd.addEventListener('click',function(){applyTime(ei);});
+    }
     return row;
   }
 
@@ -641,6 +696,33 @@
     function p(n){return (n<10?'0':'')+n;}
     return h?h+':'+p(m)+':'+p(s):m+':'+p(s);
   }
+  /* 從 YouTube 網址擷取 11 碼影片 ID,支援 watch?v=、youtu.be/、/shorts/ */
+  function ytVideoId(url){
+    var m=(url||'').match(/(?:v=|youtu\.be\/|\/shorts\/|\/embed\/)([a-zA-Z0-9_-]{11})/);
+    return m?m[1]:null;
+  }
+
+  /* ---------- YouTube 預覽播放器(IFrame Player API) ---------- */
+  var _ytApiState='idle';     // idle -> loading -> ready
+  var _ytApiWaiters=[];
+  function ytApiReady(cb){
+    if(_ytApiState==='ready'){cb();return;}
+    _ytApiWaiters.push(cb);
+    if(_ytApiState==='loading')return;
+    _ytApiState='loading';
+    window.onYouTubeIframeAPIReady=function(){
+      _ytApiState='ready';
+      _ytApiWaiters.forEach(function(fn){fn();});
+      _ytApiWaiters=[];
+    };
+    var s=document.createElement('script');
+    s.src='https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  }
+  function destroyPreview(en){
+    if(en._player){try{en._player.destroy();}catch(e){}en._player=null;}
+  }
+
   /* 解析使用者輸入的時間:'90'(秒)、'5:30'、'1:05:30',支援全形冒號;空字串回 sec:null */
   function parseTimeInput(str){
     str=(str||'').replace(/：/g,':').trim();
