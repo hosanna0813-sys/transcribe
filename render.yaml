@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: transcribe-yt
+    runtime: docker
+    dockerfilePath: ./server/Dockerfile
+    dockerContext: ./server
+    plan: free
+    healthCheckPath: /healthz
+    autoDeploy: true
