@@ -6,62 +6,74 @@
 
 ---
 
-## Windows 版步驟
+## 方式一:Docker 沙箱版(推薦)
 
-### 一、安裝環境(只做一次)
+程式與 ngrok 隧道都關在 Docker 容器裡跑:**不直接接觸你的系統**,即使套件未來出漏洞也摸不到你的檔案;電腦重開機後容器自動復活,維護最省事。
 
-1. **Python**:到 https://www.python.org/downloads/ 下載安裝,安裝時**務必勾選「Add python.exe to PATH」**
-2. **ffmpeg**:按 `Win` 鍵搜尋「cmd」開啟命令提示字元,執行:
-   ```
-   winget install Gyan.FFmpeg
-   ```
-   裝完**關閉並重開**命令提示字元視窗
-3. **下載本專案**:到 https://github.com/hosanna0813-sys/transcribe → 綠色 **Code** 按鈕 → **Download ZIP** → 解壓縮到好找的位置(例如 `C:\transcribe`)
+### 一、安裝 Docker Desktop(只做一次)
 
-### 二、啟動服務
+1. 到 https://www.docker.com/products/docker-desktop/ 下載對應版本(Windows / Mac)
+2. 用預設選項安裝(Windows 若提示啟用 WSL 2,照提示按確定即可,可能需要重開機)
+3. 開啟 Docker Desktop,左下角變綠色 running 就緒
+4. 建議到 Docker Desktop 的 Settings → General 勾選「**Start Docker Desktop when you sign in**」(開機自動啟動)
 
-雙擊 `server\home\start_home.bat`。第一次會自動安裝依賴(幾分鐘),看到 `Uvicorn running on http://0.0.0.0:8787` 就是成功。**這個視窗要保持開著。**
+### 二、註冊 ngrok(只做一次)
 
-### 三、架隧道(讓網頁連得到你家)
+1. 到 https://ngrok.com 免費註冊
+2. 儀表板「**Your Authtoken**」頁面 → 複製 token
+3. 儀表板「**Domains**」頁面 → 建立 1 個免費**固定網域**(長得像 `xxxx.ngrok-free.app`)
 
-1. 到 https://ngrok.com 註冊免費帳號
-2. 登入後到 **Setup & Installation** 下載 Windows 版 ngrok,解壓縮
-3. 依頁面指示執行一次 `ngrok config add-authtoken 你的token`
-4. 到儀表板 **Domains** 頁面,免費帳號可建立 **1 個固定網域**(長得像 `xxxx.ngrok-free.app`),建立它
-5. 執行(把網域換成你的):
-   ```
-   ngrok http 8787 --domain=xxxx.ngrok-free.app
-   ```
-   **這個視窗也要保持開著。**
+### 三、下載專案並設定
 
-### 四、回報網址
+1. 到 https://github.com/hosanna0813-sys/transcribe → 綠色 **Code** → **Download ZIP** → 解壓縮(例如放 `C:\transcribe`)
+2. 進入 `server\home` 資料夾,把 `.env.example` **複製一份改名為 `.env`**,用記事本打開,填入上一步的 authtoken 與網域,存檔
 
-把 `https://xxxx.ngrok-free.app` 這個網址告訴開發者填入網頁(或自行修改 `index.html` 開頭的 `DEFAULT_YT_SERVERS`,把它放在清單第一位)。
+### 四、啟動(之後重開機都不用再做)
 
-### 五、常開設定
+開啟終端機(Windows:在 `server\home` 資料夾的網址列輸入 `cmd` 按 Enter;Mac:終端機 `cd` 到該資料夾),執行:
 
-- 「設定 → 系統 → 電源」把「睡眠」設為**永不**(螢幕可以關)
-- 重開機後:重新雙擊 `start_home.bat` + 重下 ngrok 指令即可
+```
+docker compose up -d
+```
+
+第一次會自動建置(約 5–10 分鐘),之後幾秒就好。驗證:用瀏覽器打開 `https://你的網域/healthz`,看到 `{"ok":true,...}` 就是成功。
+
+**完成後把你的網域網址回報給開發者**填入網頁,或自行修改 `index.html` 開頭的 `DEFAULT_YT_SERVERS` 清單首位。
+
+### 日常維護
+
+- 電腦重開機:Docker Desktop 自動啟動 → 容器自動復活,**什麼都不用做**
+- 想停止:同資料夾執行 `docker compose down`
+- 更新程式:重新下載 ZIP 覆蓋後執行 `docker compose up -d --build`
+- 電源設定:「睡眠」設為永不(螢幕可以關)
 
 ---
 
-## Mac 版步驟
+## 方式二:直接安裝版(不用 Docker)
+
+<details>
+<summary>展開查看(Python + ffmpeg + ngrok 手動安裝)</summary>
+
+### Windows
+
+1. **Python**:https://www.python.org/downloads/ 下載安裝,務必勾選「Add python.exe to PATH」
+2. **ffmpeg**:命令提示字元執行 `winget install Gyan.FFmpeg`,裝完重開視窗
+3. 下載本 repo ZIP 解壓,雙擊 `server\home\start_home.bat`(視窗保持開著)
+4. 下載 ngrok:https://ngrok.com/download,設定 authtoken 後執行:
+   `ngrok http 8787 --domain=你的固定網域`(視窗保持開著)
+5. 重開機後需重複步驟 3–4
+
+### Mac
 
 ```bash
-# 一、安裝環境(只做一次;需先裝 Homebrew:https://brew.sh)
 brew install python ffmpeg ngrok
-
-# 二、下載專案並啟動服務(視窗保持開著)
-# 先從 GitHub 下載 ZIP 解壓,或 git clone,然後:
-cd transcribe/server/home
-sh start_home.sh
-
-# 三、另開一個終端機視窗,架隧道(先到 ngrok.com 註冊、設 authtoken、建固定網域)
+cd transcribe/server/home && sh start_home.sh
+# 另開視窗:
 ngrok config add-authtoken 你的token
-ngrok http 8787 --domain=xxxx.ngrok-free.app
+ngrok http 8787 --domain=你的固定網域
 ```
 
-其後同 Windows 版步驟四、五(「系統設定 → 鎖定畫面/能源」關閉睡眠)。
+</details>
 
 ---
 
@@ -69,5 +81,5 @@ ngrok http 8787 --domain=xxxx.ngrok-free.app
 
 - **家裡電腦關機會怎樣?** 網頁自動改用 Render 備援(成功率較低);開回來就恢復。
 - **會佔多少資源?** 平時幾乎為零,抓取時短暫使用網路與 CPU;音訊皆壓縮後傳出(1 小時約 14 MB)。
-- **安全嗎?** 服務只做 YouTube 音訊抓取,有每 IP 每小時次數限制,且只接受本工具網頁的瀏覽器請求;不碰你電腦上的任何檔案。
+- **安全嗎?** 服務只做 YouTube 音訊抓取,有每 IP 每小時次數限制、只認 YouTube 網址、不碰你電腦上的檔案;Docker 版更把程式整個關在沙箱裡,且不在主機上開放任何連接埠(只有 ngrok 容器經內部網路能連到它)。
 - **ngrok 免費版夠用嗎?** 夠。固定網域 1 個、流量額度對音訊傳輸綽綽有餘。
