@@ -205,7 +205,61 @@ def info(request: Request, url: str = Query(...)):
         "duration": duration,
         "too_long": duration > MAX_VIDEO_SEC,
         "max_video_sec": MAX_VIDEO_SEC,
+        # 只列人工上傳字幕,自動字幕品質不穩定,不適合當校正參考
+        "captions": sorted((d.get("subtitles") or {}).keys()),
     }
+
+
+CAPTION_TEXT_LIMIT = 20000  # 字幕僅供校正參考用,截斷避免推高校正 token 費用
+
+
+def _vtt_to_text(path: str) -> str:
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        raw = f.read()
+    lines = []
+    last = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line == "WEBVTT":
+            continue
+        if "-->" in line:
+            continue
+        if line.isdigit():
+            continue
+        if re.match(r"^(Kind|Language):", line, re.I):  # WEBVTT 標頭中繼資料列
+            continue
+        line = re.sub(r"<[^>]+>", "", line)  # 去除 <c>、<i> 之類的字幕標記
+        if not line or line == last:
+            continue
+        lines.append(line)
+        last = line
+    return " ".join(lines)[:CAPTION_TEXT_LIMIT]
+
+
+@app.get("/caption")
+def caption(request: Request, url: str = Query(...), lang: str = Query(...)):
+    rate_check("info", request)  # 輕量文字下載,沿用 info 額度
+    check_url(url)
+    tmpdir = tempfile.mkdtemp(prefix="ytcap-")
+    try:
+        opts = _ydl_base({
+            "skip_download": True,
+            "writesubtitles": True,
+            "subtitleslangs": [lang],
+            "subtitlesformat": "vtt",
+            "outtmpl": os.path.join(tmpdir, "cap.%(ext)s"),
+        })
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except Exception as e:
+            raise HTTPException(502, f"字幕下載失敗:{str(e)[:200]}")
+        vtts = glob.glob(os.path.join(tmpdir, "cap*.vtt"))
+        if not vtts:
+            raise HTTPException(404, "找不到該語言的字幕")
+        return {"text": _vtt_to_text(vtts[0])}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @app.get("/audio")

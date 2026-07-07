@@ -139,6 +139,8 @@
     border-radius:var(--radius-s);background:var(--card);color:var(--ink);cursor:pointer;
   }
   .yt-preview-actions button:hover{border-color:var(--accent);color:var(--accent)}
+  .yt-caption{margin-top:8px;display:flex;flex-direction:column;gap:6px;width:100%}
+  .yt-caption select{max-width:220px}
   .yt-add{margin-top:16px}
   .yt-add .field{display:block;font-size:.8rem;color:var(--muted);margin-bottom:5px}
   .yt-row{display:flex;gap:8px}
@@ -511,7 +513,8 @@
       return res.json();
     }).then(function(d){
       files.push({kind:'yt',url:url,name:d.title||'YouTube 影片',duration:d.duration||0,
-        mustTrim:!!d.too_long,startStr:'',endStr:'',start:null,end:null,trimOpen:!!d.too_long,trimErr:''});
+        mustTrim:!!d.too_long,startStr:'',endStr:'',start:null,end:null,trimOpen:!!d.too_long,trimErr:'',
+        captionLangs:d.captions||[],captionLang:null});
       $('ytUrl').value='';
       if(d.too_long)setAlert('影片超過 3 小時,請在清單中設定起訖時間,只轉錄需要的片段。','err');
       else setAlert('');
@@ -632,6 +635,32 @@
       }
       setStart.addEventListener('click',function(){applyTime(si);});
       setEnd.addEventListener('click',function(){applyTime(ei);});
+
+      if(en.captionLangs&&en.captionLangs.length){
+        var capWrap=document.createElement('div');capWrap.className='yt-caption';
+        var capLabel=document.createElement('label');capLabel.className='check inline';
+        var capCk=document.createElement('input');capCk.type='checkbox';
+        capLabel.appendChild(capCk);
+        capLabel.appendChild(document.createTextNode(
+          '使用官方字幕輔助校正(需開啟下方「ChatGPT 校正」;會增加校正費用)'));
+        var capSelect=document.createElement('select');
+        en.captionLangs.forEach(function(code){
+          var opt=document.createElement('option');
+          opt.value=code;opt.textContent=captionLangLabel(code);
+          capSelect.appendChild(opt);
+        });
+        capCk.checked=en.captionLang!=null;
+        if(en.captionLang!=null)capSelect.value=en.captionLang;
+        capSelect.style.display=capCk.checked?'':'none';
+        function syncCaptionLang(){en.captionLang=capCk.checked?capSelect.value:null;}
+        capCk.addEventListener('change',function(){
+          capSelect.style.display=capCk.checked?'':'none';
+          syncCaptionLang();
+        });
+        capSelect.addEventListener('change',syncCaptionLang);
+        capWrap.appendChild(capLabel);capWrap.appendChild(capSelect);
+        row.appendChild(capWrap);
+      }
     }
     return row;
   }
@@ -696,6 +725,13 @@
     function p(n){return (n<10?'0':'')+n;}
     return h?h+':'+p(m)+':'+p(s):m+':'+p(s);
   }
+  /* 常見字幕語言碼顯示名稱,查無對照就顯示原始碼 */
+  var CAPTION_LANG_NAMES={
+    'zh-Hant':'繁體中文','zh-TW':'繁體中文','zh-Hans':'簡體中文','zh-CN':'簡體中文',
+    'zh':'中文','en':'英文','ja':'日文','ko':'韓文'
+  };
+  function captionLangLabel(code){return CAPTION_LANG_NAMES[code]||code;}
+
   /* 從 YouTube 網址擷取 11 碼影片 ID,支援 watch?v=、youtu.be/、/shorts/ */
   function ytVideoId(url){
     var m=(url||'').match(/(?:v=|youtu\.be\/|\/shorts\/|\/embed\/)([a-zA-Z0-9_-]{11})/);
@@ -868,6 +904,12 @@
     return ytFetch(q).then(function(res){return res.blob();});
   }
 
+  /* 下載官方人工字幕純文字,僅供校正步驟參考用(不進逐字稿本文) */
+  function fetchYtCaption(en){
+    var q='/caption?url='+encodeURIComponent(en.url)+'&lang='+encodeURIComponent(en.captionLang);
+    return ytFetch(q).then(function(res){return res.json();}).then(function(d){return d.text||'';});
+  }
+
   function transcribeBlob(key,blobOrFile,fname,offset,useTime){
     var form=new FormData();
     form.append('file',blobOrFile,fname);
@@ -951,8 +993,21 @@
     return next(0);
   }
 
+  /* 收集所有勾選了「字幕輔助校正」的項目的官方字幕文字,標記對應檔名供 GPT 比對用 */
+  function collectCaptionsBlock(){
+    var jobs=[];
+    files.forEach(function(en,i){
+      if(en.kind==='yt'&&en.captionLang){
+        var header=files.length>1?('【檔案'+(i+1)+':'+en.name+'】\n'):'';
+        jobs.push(fetchYtCaption(en).then(function(text){return header+text;}).catch(function(){return null;}));
+      }
+    });
+    if(!jobs.length)return Promise.resolve('');
+    return Promise.all(jobs).then(function(blocks){return blocks.filter(Boolean).join('\n\n');});
+  }
+
   /* ---------- 階段二:ChatGPT 校正 ---------- */
-  function buildSystemPrompt(){
+  function buildSystemPrompt(captionsBlock){
     var rules=[
       '你是逐字稿校對員。以下是一份語音辨識產生的華語逐字稿,請依規則校正:',
       '1. 只能修正錯字、同音誤植、標點符號與分段,絕對不得改寫、潤飾、增加或刪除任何語句內容。',
@@ -963,6 +1018,11 @@
     ];
     if($('optFiller').checked)rules.push('5. 刪除無意義的口頭贅詞(嗯、啊、呃、就是說、那個、然後然後等),但不得刪除有實質內容的字句。');
     if($('optSpeaker').checked)rules.push('6. 依語意推測發言者,於每次換人發言的段落開頭標示「甲:」「乙:」(如有第三人則丙:)。無法判斷時維持不標。');
+    if(captionsBlock){
+      rules.push((rules.length+1)+'. 以下提供部分檔案對應的 YouTube 官方字幕全文,僅供比對是否有'+
+        '同音字、專有名詞、人名等用字誤植;逐字稿內容一律以語音辨識結果為準,不得依字幕內容'+
+        '增加、刪除或改寫語句(字幕可能有誤打或版本落差,發現與逐字稿明顯不一致時忽略即可):\n'+captionsBlock);
+    }
     rules.push('直接輸出校正後全文,不要加任何說明、前言或 Markdown 標記。');
     return rules.join('\n');
   }
@@ -977,9 +1037,9 @@
     return chunks;
   }
 
-  function correct(key,text){
+  function correct(key,text,captionsBlock){
     var chunks=chunkText(text,6000);
-    var sys=buildSystemPrompt();
+    var sys=buildSystemPrompt(captionsBlock);
     P.stage=2;P.chunkDone=0;P.chunkCount=chunks.length;progRender();
     return pool(chunks,3,function(chunk){
       return fetchRetry('https://api.openai.com/v1/chat/completions',{
@@ -1019,6 +1079,9 @@
       if(en.kind==='yt'&&en.mustTrim&&en.start==null&&en.end==null){
         setAlert('「'+escapeHtml(en.name)+'」超過 3 小時,請按該項目的「截取」設定起訖時間後再開始。','err');return;
       }
+      if(en.captionLang&&!$('optCorrect').checked){
+        setAlert('「'+escapeHtml(en.name)+'」已勾選字幕輔助校正,但尚未開啟下方「ChatGPT 校正」,請開啟後再試,或取消字幕選項。','err');return;
+      }
     }
     goBtn.disabled=true;
     goBtn.textContent='處理中……';
@@ -1029,10 +1092,10 @@
     var startAt=Date.now();
     progStart(files.length,$('optCorrect').checked);
 
-    transcribeAll(key).then(function(text){
-      rawText=text;
+    Promise.all([transcribeAll(key),collectCaptionsBlock()]).then(function(r){
+      rawText=r[0];
       if($('optCorrect').checked){
-        return correct(key,text).then(function(fixed){fixedText=fixed;});
+        return correct(key,r[0],r[1]).then(function(fixed){fixedText=fixed;});
       }
       fixedText='';
       return null;
