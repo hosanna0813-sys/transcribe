@@ -569,7 +569,7 @@
       var rm=btn('✕','移除',false,function(){destroyPreview(en);files.splice(i,1);renderList();updateSteps();});
       main.appendChild(tr);main.appendChild(up);main.appendChild(dn);main.appendChild(rm);
       li.appendChild(main);
-      if(en.kind==='yt')li.appendChild(previewBlock(en));
+      if(en.kind==='yt')li.appendChild(previewBlock(en,li));
       if(en.trimOpen)li.appendChild(trimRow(en));
       ul.appendChild(li);
     });
@@ -633,7 +633,7 @@
   }
 
   /* YouTube 預覽播放器區塊:加入影片後直接顯示,不必按「截取」才看得到 */
-  function previewBlock(en){
+  function previewBlock(en,li){
     var pv=document.createElement('div');pv.className='yt-preview';
     var frame=document.createElement('div');frame.className='yt-preview-frame';
     var loading=document.createElement('div');loading.className='yt-preview-loading';loading.textContent='載入播放器中…';
@@ -669,8 +669,19 @@
       if(!en._player)return;
       var val=fmtDur(en._player.getCurrentTime());
       if(which==='start')en.startStr=val;else en.endStr=val;
-      en.trimOpen=true;  // 標記時間點等於要截取,順便展開起訖欄位讓使用者看到結果
-      renderList();
+      /* 直接更新/插入起訖欄位,不整份重繪 renderList()——避免播放器被銷毀
+         重建,導致影片重新載入、跳回開頭,使用者無法連續標記起訖點 */
+      var existingRow=li.querySelector('.trim-row');
+      if(existingRow){
+        var input=existingRow.querySelector(which==='start'?'.t-start':'.t-end');
+        input.value=val;
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+      }else{
+        en.trimOpen=true;
+        li.appendChild(trimRow(en));
+        var trToggle=li.querySelector('.trim-toggle');
+        if(trToggle)trToggle.classList.add('on');
+      }
     }
     setStart.addEventListener('click',function(){mark('start');});
     setEnd.addEventListener('click',function(){mark('end');});
