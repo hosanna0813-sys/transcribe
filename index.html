@@ -754,7 +754,11 @@
   var _ytApiState='idle';     // idle -> loading -> ready
   var _ytApiWaiters=[];
   function ytApiReady(cb){
-    if(_ytApiState==='ready'){cb();return;}
+    /* 一律非同步呼叫 cb(即使已 ready):renderList() 重繪時是先建立新的
+       previewBlock() 再把整個 <li> 掛回文件,若在此同步呼叫 cb,frame 這時
+       還沒接上文件,isConnected 誤判為 false 導致播放器建立失敗、卡在
+       「載入播放器中」。用 setTimeout 延到下一輪,確保 DOM 已掛回文件。 */
+    if(_ytApiState==='ready'){setTimeout(cb,0);return;}
     _ytApiWaiters.push(cb);
     if(_ytApiState==='loading')return;
     _ytApiState='loading';
