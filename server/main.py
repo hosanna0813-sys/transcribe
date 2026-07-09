@@ -593,6 +593,52 @@ def _whisper_transcribe(audio_path: str, api_key: str) -> str:
     return resp.text.strip()
 
 
+# ---- GPT 校正(可選,便宜模型;成本小,MVP 不額外收費)----
+CORRECTION_MODEL = os.environ.get("CORRECTION_MODEL", "gpt-4o-mini")
+DEFAULT_VOCAB = ("輿情, 行政院, 災害防救, 新聞稿, 記者會, 質詢, 陳情, 簽呈, 公文, "
+                 "府會聯絡, 局處, 科長, 專門委員, 參事, 主任秘書")
+_CORRECT_SYS = (
+    "你是逐字稿校對員。以下是一份語音辨識產生的華語逐字稿,請依規則校正:\n"
+    "1. 只能修正錯字、同音誤植、標點符號與分段,絕對不得改寫、潤飾、增加或刪除任何語句內容。\n"
+    "2. 以下詞庫是本領域的正確用詞,發現同音或形近的誤植時,修正為詞庫寫法:\n" + DEFAULT_VOCAB + "\n"
+    "3. 保留所有 [時:分:秒] 時間標記於原位,不得移動或刪除。\n"
+    "4. 使用台灣慣用的繁體中文與全形標點。\n"
+    "直接輸出校正後全文,不要加任何說明、前言或 Markdown 標記。"
+)
+
+
+def _chunk_text(text: str, max_len: int = 6000) -> list:
+    """依段落切塊,單塊不超過 max_len 字,供 GPT 逐塊校正"""
+    chunks, buf = [], ""
+    for para in text.split("\n\n"):
+        if buf and len(buf) + len(para) > max_len:
+            chunks.append(buf)
+            buf = ""
+        buf = (buf + "\n\n" + para) if buf else para
+    if buf:
+        chunks.append(buf)
+    return chunks
+
+
+def _gpt_correct(text: str, api_key: str) -> str:
+    """用 GPT 逐塊校正逐字稿(修錯字/標點,不改內容);失敗由呼叫端決定退回原文"""
+    import httpx
+    out = []
+    for chunk in _chunk_text(text):
+        resp = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": CORRECTION_MODEL, "temperature": 0,
+                  "messages": [{"role": "system", "content": _CORRECT_SYS},
+                               {"role": "user", "content": chunk}]},
+            timeout=300,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"校正失敗:{resp.text[:150]}")
+        out.append((resp.json()["choices"][0]["message"]["content"] or "").strip())
+    return "\n\n".join(out).strip()
+
+
 @app.get("/api/me")
 def api_me(authorization: str | None = Header(None)):
     uid = _verify_jwt(authorization)
@@ -808,8 +854,8 @@ def _transcode_and_segment(src: str, tmpdir: str) -> list:
     return sorted(glob.glob(os.path.join(tmpdir, "seg_*.m4a")))
 
 
-def _run_job(job_id, uid, src_path, duration, tmpdir, api_key):
-    """背景執行:切段 → 分批轉錄 → 合併 → 結算;失敗退款。結束釋放槽與暫存。"""
+def _run_job(job_id, uid, src_path, duration, tmpdir, api_key, do_correct=False):
+    """背景執行:切段 → 分批轉錄 → 合併 →(可選)GPT 校正 → 結算;失敗退款。"""
     try:
         _job_set(job_id, status="processing", stage="轉檔切段中", progress=0)
         segs = _transcode_and_segment(src_path, tmpdir)
@@ -844,6 +890,14 @@ def _run_job(job_id, uid, src_path, duration, tmpdir, api_key):
             parts.append((marker + " " + (t or "")).strip())
         full = "\n\n".join(parts).strip()
 
+        # 可選:GPT 校正(修錯字/標點);校正失敗就退回未校正原文,不讓整筆失敗
+        if do_correct and full:
+            _job_set(job_id, stage="校正中", progress=100)
+            try:
+                full = _gpt_correct(full, api_key)
+            except Exception:
+                pass
+
         cost_usd = round(duration / 60.0 * WHISPER_USD_PER_MIN, 6)
         settle = _sb_rpc("complete_transcription", {
             "p_usage_id": job_id, "p_user_id": uid,
@@ -875,6 +929,7 @@ def api_create_job(
     youtube_url: str | None = Form(None),
     start: float | None = Form(None),
     end: float | None = Form(None),
+    correct: bool = Form(False),
     authorization: str | None = Header(None),
 ):
     api_key, supabase_url, service_key = _paid_env()
@@ -936,7 +991,7 @@ def api_create_job(
             _v3_jobs[usage_id] = {"status": "processing", "stage": "準備中",
                                   "progress": 0, "uid": uid}
         threading.Thread(target=_run_job,
-                         args=(usage_id, uid, src, duration, tmpdir, api_key),
+                         args=(usage_id, uid, src, duration, tmpdir, api_key, correct),
                          daemon=True).start()
         started = True                      # 交棒給背景執行緒:槽與暫存由它清理
         return {"job_id": usage_id, "duration_seconds": int(math.ceil(duration))}
