@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<title>語音轉逐字稿(計費版)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F6FA; --card:#FFFFFF; --ink:#18213A; --muted:#65718A;
+    --accent:#3B5BDB; --accent-soft:#EDF1FE; --line:#E3E8F0;
+    --ok:#188A50; --ok-soft:#E9F7EF; --err:#C4453A; --err-soft:#FCEEEC;
+    --radius:14px; --radius-s:9px;
+    --shadow:0 1px 2px rgba(24,33,58,.05),0 10px 30px rgba(24,33,58,.07);
+  }
+  [data-mode=dark]{
+    --bg:#0E1320; --card:#171E2E; --ink:#E7EBF4; --muted:#93A0B8;
+    --accent:#7B96F4; --accent-soft:#232E4E; --line:#2A3550;
+    --ok:#5CC98A; --ok-soft:#173226; --err:#F08A80; --err-soft:#3A211E;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 14px 36px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Noto Sans TC',system-ui,-apple-system,sans-serif;
+    background:var(--bg);color:var(--ink);min-height:100vh;
+    padding:28px 16px 64px;line-height:1.6;transition:background .25s,color .25s;
+  }
+  .wrap{max-width:560px;margin:0 auto}
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;gap:12px}
+  .brand{display:flex;align-items:center;gap:12px;min-width:0}
+  .logo{
+    width:42px;height:42px;flex:none;border-radius:12px;
+    background:linear-gradient(135deg,var(--accent),#7B5BD6);
+    display:flex;align-items:center;justify-content:center;color:#fff;
+  }
+  .logo svg{width:22px;height:22px}
+  .brand h1{font-size:1.25rem;font-weight:700;letter-spacing:.04em;line-height:1.3}
+  .brand p{font-size:.78rem;color:var(--muted)}
+  #modeBtn{
+    width:38px;height:38px;flex:none;border-radius:50%;border:1px solid var(--line);
+    background:var(--card);cursor:pointer;font-size:1rem;line-height:1;
+  }
+  #modeBtn:hover{border-color:var(--accent)}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);margin-bottom:16px;overflow:hidden;
+  }
+  .card>section{padding:22px 24px}
+  .card>section+section{border-top:1px solid var(--line)}
+  .step-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+  .step-head h2{font-size:1rem;font-weight:700;letter-spacing:.03em}
+  label.field{display:block;font-size:.8rem;color:var(--muted);margin-bottom:5px}
+  input[type=email]{
+    width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:var(--radius-s);
+    font-family:inherit;font-size:.92rem;color:var(--ink);background:var(--card);
+  }
+  input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
+  ::placeholder{color:var(--muted);opacity:.7}
+  .primary{
+    width:100%;padding:13px;border:none;border-radius:var(--radius-s);margin-top:12px;
+    background:var(--accent);color:#fff;font-size:.98rem;font-weight:700;
+    letter-spacing:.06em;cursor:pointer;font-family:inherit;transition:.15s;
+  }
+  .primary:hover{filter:brightness(1.08)}
+  .primary:disabled{opacity:.45;cursor:not-allowed;filter:none}
+  .ghost{
+    padding:9px 16px;background:var(--card);color:var(--ink);
+    border:1px solid var(--line);border-radius:var(--radius-s);
+    font-size:.86rem;cursor:pointer;font-family:inherit;transition:.15s;
+  }
+  .ghost:hover{border-color:var(--accent);color:var(--accent)}
+  .hint{font-size:.78rem;color:var(--muted);margin-top:10px;line-height:1.65}
+  .hint code{background:var(--accent-soft);color:var(--accent);padding:1px 5px;border-radius:4px;font-size:.9em}
+  .alert{margin-top:12px;font-size:.85rem;line-height:1.65;padding:11px 13px;border-radius:var(--radius-s)}
+  .alert.err{background:var(--err-soft);color:var(--err)}
+  .alert.ok{background:var(--ok-soft);color:var(--ok)}
+  .balance{display:flex;align-items:baseline;gap:10px;padding:18px 0 6px}
+  .balance .num{font-size:2.4rem;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums;line-height:1}
+  .balance .unit{font-size:1rem;color:var(--muted)}
+  .acct-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .acct-row .who{font-size:.86rem;color:var(--muted);word-break:break-all;min-width:0}
+  .foot-note{font-size:.76rem;color:var(--muted);margin-top:20px;text-align:center;line-height:1.7}
+  .foot-note a{color:var(--accent);text-decoration:none}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></div>
+        <div>
+          <h1>語音轉逐字稿</h1>
+          <p>計費版 · 預付分鐘數</p>
+        </div>
+      </div>
+      <button id="modeBtn" title="切換深色/淺色" aria-label="切換深色/淺色">🌙</button>
+    </div>
+
+    <div class="card hidden" id="configCard">
+      <section>
+        <div class="step-head"><h2>尚未設定 Supabase</h2></div>
+        <p class="hint">本頁需要先填入 Supabase 專案的網址與 anon key 才能運作。
+        請開啟 <code>v2/index.html</code>,找到最上方 <code>SUPABASE_CONFIG</code> 區塊填入你的
+        專案資訊(步驟見 <code>v2/README.md</code>)。</p>
+      </section>
+    </div>
+
+    <div class="card hidden" id="loadingCard">
+      <section><p class="hint">載入中……</p></section>
+    </div>
+
+    <div class="card hidden" id="loginCard">
+      <section>
+        <div class="step-head"><h2>登入</h2></div>
+        <label class="field" for="email">輸入 Email,我們會寄一封登入連結給你</label>
+        <input type="email" id="email" placeholder="you@example.com" autocomplete="email" inputmode="email">
+        <button class="primary" id="sendLink">寄送登入連結</button>
+        <div id="loginMsg"></div>
+        <p class="hint">第一次登入會自動建立帳號。點信中的連結即完成登入,無需密碼。</p>
+      </section>
+    </div>
+
+    <div class="card hidden" id="accountCard">
+      <section>
+        <div class="acct-row">
+          <div class="who">已登入:<span id="userEmail"></span></div>
+          <button class="ghost" id="logoutBtn">登出</button>
+        </div>
+      </section>
+      <section>
+        <div class="step-head"><h2>剩餘額度</h2></div>
+        <div class="balance"><span class="num" id="minNum">–</span><span class="unit">分鐘</span></div>
+        <p class="hint" id="creditLine"></p>
+        <p class="hint">階段一僅顯示額度。轉錄、扣點與加值功能會在後續版本陸續開放。
+        目前需要額度可請站長手動加值。</p>
+      </section>
+    </div>
+
+    <p class="foot-note">
+      想用免費、自帶 OpenAI Key 的版本?<a href="../">前往原版工具 →</a>
+    </p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+  /* =============================================================
+     Supabase 設定 — 填入你的專案資訊(步驟見 v2/README.md)
+     · SUPABASE_URL:專案的 Project URL
+     · SUPABASE_ANON_KEY:anon / public key(可公開放前端,防護靠 RLS)
+     · service_role key 絕對不要填在這裡!那是後端專用的。
+     ============================================================= */
+  var SUPABASE_CONFIG = {
+    url: '',        // 例:https://xxxxxxxx.supabase.co
+    anonKey: ''     // 例:eyJhbGciOi...(anon public key)
+  };
+  /* ============================================================= */
+
+  (function(){
+    var $=function(id){return document.getElementById(id);};
+    function show(id){$(id).classList.remove('hidden');}
+    function hide(id){$(id).classList.add('hidden');}
+    function setMsg(el,text,kind){
+      if(!text){el.innerHTML='';return;}
+      el.innerHTML='<div class="alert '+(kind||'ok')+'">'+text+'</div>';
+    }
+
+    var modeBtn=$('modeBtn');
+    function applyMode(m){
+      if(m==='dark'){document.documentElement.setAttribute('data-mode','dark');modeBtn.textContent='☀️';}
+      else{document.documentElement.removeAttribute('data-mode');modeBtn.textContent='🌙';}
+    }
+    try{applyMode(localStorage.getItem('tw_mode')||'');}catch(e){}
+    modeBtn.addEventListener('click',function(){
+      var dark=document.documentElement.getAttribute('data-mode')==='dark';
+      var next=dark?'':'dark';applyMode(next);
+      try{localStorage.setItem('tw_mode',next);}catch(e){}
+    });
+
+    if(!SUPABASE_CONFIG.url||!SUPABASE_CONFIG.anonKey||typeof supabase==='undefined'){
+      show('configCard');
+      return;
+    }
+
+    var sb=supabase.createClient(SUPABASE_CONFIG.url,SUPABASE_CONFIG.anonKey);
+    function fmtInt(n){return (n||0).toLocaleString();}
+
+    function render(session){
+      hide('loadingCard');
+      if(session&&session.user){
+        hide('loginCard');show('accountCard');
+        $('userEmail').textContent=session.user.email||'(未知)';
+        loadBalance(session.user.id);
+      }else{
+        hide('accountCard');show('loginCard');
+      }
+    }
+
+    function loadBalance(uid){
+      $('minNum').textContent='…';
+      sb.from('credit_balances').select('remaining_credits').eq('user_id',uid).maybeSingle()
+        .then(function(res){
+          var credits=(res.data&&res.data.remaining_credits)||0;
+          $('minNum').textContent=Math.floor(credits/60);
+          $('creditLine').textContent='共 '+fmtInt(credits)+' 秒(credits);60 秒 = 1 分鐘。';
+        },function(){
+          $('minNum').textContent='0';
+          $('creditLine').textContent='無法讀取額度,請稍後重試。';
+        });
+    }
+
+    var sending=false;
+    $('sendLink').addEventListener('click',function(){
+      if(sending)return;
+      var email=($('email').value||'').trim();
+      if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){
+        setMsg($('loginMsg'),'請輸入有效的 Email。','err');return;
+      }
+      sending=true;this.disabled=true;this.textContent='寄送中…';
+      setMsg($('loginMsg'),'');
+      sb.auth.signInWithOtp({email:email,options:{emailRedirectTo:window.location.href}})
+        .then(function(res){
+          if(res.error){setMsg($('loginMsg'),'寄送失敗:'+res.error.message,'err');}
+          else{setMsg($('loginMsg'),'已寄出登入連結,請到信箱點擊連結完成登入。','ok');}
+        })
+        .catch(function(e){setMsg($('loginMsg'),'寄送失敗:'+(e&&e.message||e),'err');})
+        .finally(function(){sending=false;$('sendLink').disabled=false;$('sendLink').textContent='寄送登入連結';});
+    });
+    $('email').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();$('sendLink').click();}});
+
+    $('logoutBtn').addEventListener('click',function(){sb.auth.signOut();});
+
+    show('loadingCard');
+    sb.auth.getSession().then(function(res){render(res.data.session);});
+    sb.auth.onAuthStateChange(function(_event,session){render(session);});
+  })();
+  </script>
+</body>
+</html>
