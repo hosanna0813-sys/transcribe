@@ -172,6 +172,7 @@
         <div class="step-head"><h2>剩餘額度</h2></div>
         <div class="balance"><span class="num" id="minNum">–</span><span class="unit">分鐘</span></div>
         <p class="hint" id="creditLine"></p>
+        <p class="hint hidden" id="freeLine"></p>
       </section>
       <section>
         <div class="step-head"><h2>轉錄(上傳檔案或 YouTube)</h2></div>
@@ -302,6 +303,20 @@
       sb.from('credit_balances').select('remaining_credits').eq('user_id',uid).maybeSingle()
         .then(function(res){ setCredits((res.data&&res.data.remaining_credits)||0); },
               function(){ $('minNum').textContent='0'; $('creditLine').textContent='無法讀取額度,請稍後重試。'; });
+      loadFree();
+    }
+    /* 今日免費剩餘(需問後端,因為免費上限存在後端);後端休眠時忽略,不影響其他 */
+    function loadFree(){
+      sb.auth.getSession().then(function(r){
+        var tk=r.data.session&&r.data.session.access_token;if(!tk)return;
+        return fetch(BACKEND_URL+'/api/me',{headers:{'Authorization':'Bearer '+tk,'ngrok-skip-browser-warning':'1'}})
+          .then(function(res){return res.ok?res.json():null;});
+      }).then(function(d){
+        if(d&&d.free_daily_minutes>0){
+          $('freeLine').textContent='今日免費剩餘 '+d.free_remaining_minutes+' / '+d.free_daily_minutes+' 分鐘(轉錄優先扣免費額度,隔天重置)';
+          show('freeLine');
+        }else{hide('freeLine');}
+      }).catch(function(){});
     }
 
     /* ---------- 轉錄任務:送出 /api/jobs → 輪詢 /api/jobs/{id} ---------- */
@@ -395,6 +410,7 @@
           setMsg($('transcribeMsg'),'轉錄完成 ✓','ok');
           $('resultText').value=d.text||'';show('resultBox');
           if(typeof d.remaining_credits==='number')setCredits(d.remaining_credits);
+          loadFree();   // 免費額度可能被用掉,刷新顯示
         }else{ // failed
           try{localStorage.removeItem('tw_v2_job');}catch(e){}
           hide('progBox');setBusy(false);

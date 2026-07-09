@@ -639,12 +639,37 @@ def _gpt_correct(text: str, api_key: str) -> str:
     return "\n\n".join(out).strip()
 
 
+def _free_daily_credits() -> int:
+    """每日免費額度(credits/秒),由 FREE_DAILY_MINUTES 設定;0 = 關閉"""
+    try:
+        return max(0, int(os.environ.get("FREE_DAILY_MINUTES", "0"))) * 60
+    except ValueError:
+        return 0
+
+
+def _free_remaining(uid: str) -> int:
+    """今日剩餘免費 credits(秒)"""
+    limit = _free_daily_credits()
+    if limit <= 0:
+        return 0
+    try:
+        res = _sb_rpc("free_remaining", {"p_user_id": uid, "p_free_limit": limit})
+        if isinstance(res, list):
+            res = res[0] if res else 0
+        return int(res or 0)
+    except Exception:
+        return 0
+
+
 @app.get("/api/me")
 def api_me(authorization: str | None = Header(None)):
     uid = _verify_jwt(authorization)
     credits = _sb_balance(uid)
+    free = _free_remaining(uid)
     return {"user_id": uid, "role": _sb_role(uid),
-            "remaining_credits": credits, "remaining_minutes": credits // 60}
+            "remaining_credits": credits, "remaining_minutes": credits // 60,
+            "free_remaining_credits": free, "free_remaining_minutes": free // 60,
+            "free_daily_minutes": _free_daily_credits() // 60}
 
 
 class _AddCreditsBody(BaseModel):
@@ -730,7 +755,7 @@ def api_transcribe(
         res = _sb_rpc("reserve_transcription", {
             "p_user_id": uid, "p_cost": cost,
             "p_source_type": "upload", "p_source_name": (file.filename or "")[:200],
-            "p_duration": cost,
+            "p_duration": cost, "p_free_limit": _free_daily_credits(),
         })
         row = res[0] if isinstance(res, list) else res
         if not row or not row.get("ok"):
@@ -796,12 +821,29 @@ def api_transcribe(
 # =============================================================
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone, timedelta
 
 MAX_JOB_SEC = 3 * 3600         # 長音檔上限 3 小時
 CHUNK_SEC = 540                # 每段 9 分鐘(16k 單聲道 32k ≈ 2MB,遠小於 Whisper 25MB)
 CHUNK_WORKERS = 3              # 同一任務內分段並行轉錄數
+JOBS_PER_HOUR_PER_USER = 40   # 每使用者每小時建立任務上限(防濫用)
+WATCHDOG_MAX_SEC = 4 * 3600   # 任務逾此時長仍 processing 視為卡住(> 3 小時上限)
 _v3_jobs: dict = {}            # job_id(=usage_log id) -> 狀態
 _v3_lock = threading.Lock()
+_user_hits: dict = defaultdict(deque)     # uid -> deque[timestamp]
+_user_rate_lock = threading.Lock()
+
+
+def _user_rate_check(uid: str):
+    """每使用者每小時建立任務上限(防濫用;免費額度濫用的第二道防線)"""
+    now = time.time()
+    with _user_rate_lock:
+        dq = _user_hits[uid]
+        while dq and now - dq[0] > 3600:
+            dq.popleft()
+        if len(dq) >= JOBS_PER_HOUR_PER_USER:
+            raise HTTPException(429, "使用太頻繁,請稍後再試")
+        dq.append(now)
 
 
 def _job_set(job_id, **kw):
@@ -937,6 +979,7 @@ def api_create_job(
         raise HTTPException(503, "付費轉錄尚未啟用(伺服器未設定金鑰)")
     rate_check("audio", request)
     uid = _verify_jwt(authorization)
+    _user_rate_check(uid)
 
     if not _audio_slots.acquire(blocking=False):
         raise HTTPException(429, "伺服器忙碌中,請稍候一分鐘再試")
@@ -976,6 +1019,7 @@ def api_create_job(
         res = _sb_rpc("reserve_transcription", {
             "p_user_id": uid, "p_cost": cost,
             "p_source_type": source_type, "p_source_name": source_name, "p_duration": cost,
+            "p_free_limit": _free_daily_credits(),
         })
         row = res[0] if isinstance(res, list) else res
         if not row or not row.get("ok"):
@@ -1085,4 +1129,37 @@ def _cleanup_loop():
             pass
 
 
+def _watchdog_loop():
+    """每 15 分鐘掃 DB:卡住(逾 4 小時仍 processing/reserved)的任務自動失敗退款。
+    對應規畫書 11.2:救回因當機/重啟/掛住而沒走完流程、又沒被使用者輪詢到的任務。"""
+    while True:
+        time.sleep(900)
+        try:
+            _, supabase_url, service_key = _paid_env()
+            if not (supabase_url and service_key):
+                continue
+            threshold = (datetime.now(timezone.utc)
+                         - timedelta(seconds=WATCHDOG_MAX_SEC)).strftime("%Y-%m-%dT%H:%M:%S")
+            url = (f"{supabase_url}/rest/v1/usage_logs"
+                   f"?status=in.(reserved,processing)&created_at=lt.{threshold}"
+                   f"&select=id,user_id")
+            req = urllib.request.Request(url, headers={
+                "apikey": service_key, "Authorization": f"Bearer {service_key}"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                rows = json.loads(r.read().decode() or "[]")
+            for row in rows:
+                jid, u = row.get("id"), row.get("user_id")
+                with _v3_lock:
+                    if jid in _v3_jobs:      # 本機仍在跑,不動它
+                        continue
+                try:
+                    _sb_rpc("fail_transcription", {
+                        "p_usage_id": jid, "p_user_id": u, "p_reason": "watchdog_timeout"})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
 threading.Thread(target=_cleanup_loop, daemon=True).start()
+threading.Thread(target=_watchdog_loop, daemon=True).start()
