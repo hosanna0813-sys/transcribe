@@ -3,3 +3,7 @@ uvicorn>=0.30
 yt-dlp>=2026.7.4
 yt-dlp-ejs>=0.8.0
 bgutil-ytdlp-pot-provider==1.3.1
+# 計費版 v2 階段二:付費轉錄後端(JWT 驗證、Supabase RPC、OpenAI 呼叫、檔案上傳)
+httpx>=0.27
+PyJWT[crypto]>=2.8
+python-multipart>=0.0.9

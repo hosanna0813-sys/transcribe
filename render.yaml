@@ -7,3 +7,12 @@ services:
     plan: free
     healthCheckPath: /healthz
     autoDeploy: true
+    # 計費版 v2 付費轉錄用的金鑰(值在 Render 後台填,不進 git;
+    # 未設定時付費端點回錯,但免費 YouTube 服務照常運作)
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

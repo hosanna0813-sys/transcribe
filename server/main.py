@@ -99,7 +99,7 @@ app.add_middleware(
         "http://127.0.0.1:8000",
         "null",  # 以 file:// 直接開啟 index.html 時的 origin
     ],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -411,3 +411,274 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
         raise HTTPException(413, "音訊超過 100 MB 上限,請用起訖時間縮短範圍")
 
     return out
+
+
+# =============================================================
+# 計費版 v2 階段二:上傳短音檔 → 後端轉錄 → 扣點
+#
+# 金鑰只在後端環境變數(未設定時以下端點回錯,但不影響免費版啟動):
+#   OPENAI_API_KEY / SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY
+# =============================================================
+import json
+import math
+import urllib.request
+import urllib.error
+
+from fastapi import File, Form, Header, UploadFile
+
+MAX_CLIP_UPLOAD_SEC = 10 * 60          # 階段二短音檔上限 10 分鐘
+WHISPER_USD_PER_MIN = 0.006            # Whisper 定價(供成本估算/監控)
+_jwks_cache: dict = {"keys": None, "at": 0.0}
+_jwks_lock = threading.Lock()
+
+
+def _paid_env():
+    """付費相關環境變數(延遲讀取,未設定回 None 讓端點回友善錯誤)"""
+    return (
+        os.environ.get("OPENAI_API_KEY"),
+        (os.environ.get("SUPABASE_URL") or "").rstrip("/"),
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY"),
+    )
+
+
+def _get_jwks(supabase_url: str) -> list:
+    """取 Supabase 專案的 JWKS 公鑰(快取 1 小時),用來驗證 ES256 JWT"""
+    now = time.time()
+    with _jwks_lock:
+        if _jwks_cache["keys"] is not None and now - _jwks_cache["at"] < 3600:
+            return _jwks_cache["keys"]
+    url = f"{supabase_url}/auth/v1/.well-known/jwks.json"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        keys = data.get("keys") or []
+    except Exception as e:
+        raise HTTPException(503, f"無法取得驗證金鑰:{str(e)[:120]}")
+    with _jwks_lock:
+        _jwks_cache["keys"] = keys
+        _jwks_cache["at"] = now
+    return keys
+
+
+def _verify_jwt(authorization: str | None) -> str:
+    """驗證 Authorization: Bearer <supabase JWT>,回傳 user_id(sub)"""
+    import jwt as pyjwt  # PyJWT[crypto]
+    from jwt import PyJWKClient, algorithms
+
+    _, supabase_url, _ = _paid_env()
+    if not supabase_url:
+        raise HTTPException(503, "伺服器尚未設定 SUPABASE_URL")
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "請先登入")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        header = pyjwt.get_unverified_header(token)
+    except Exception:
+        raise HTTPException(401, "登入憑證無效")
+    kid = header.get("kid")
+    alg = header.get("alg", "ES256")
+    keys = _get_jwks(supabase_url)
+    jwk = next((k for k in keys if k.get("kid") == kid), None)
+    if jwk is None:
+        # 快取可能過期(專案輪替金鑰),強制刷新一次再找
+        with _jwks_lock:
+            _jwks_cache["keys"] = None
+        jwk = next((k for k in _get_jwks(supabase_url) if k.get("kid") == kid), None)
+    if jwk is None:
+        raise HTTPException(401, "登入憑證無效(找不到對應金鑰)")
+    try:
+        key = algorithms.get_default_algorithms()[alg].from_jwk(json.dumps(jwk))
+        claims = pyjwt.decode(token, key=key, algorithms=[alg], audience="authenticated")
+    except Exception as e:
+        raise HTTPException(401, f"登入已過期或無效:{str(e)[:100]}")
+    uid = claims.get("sub")
+    if not uid:
+        raise HTTPException(401, "登入憑證缺少使用者資訊")
+    return uid
+
+
+def _sb_rpc(fn: str, payload: dict):
+    """以 service_role 呼叫 Supabase REST RPC(繞過 RLS);回傳 JSON"""
+    _, supabase_url, service_key = _paid_env()
+    if not supabase_url or not service_key:
+        raise HTTPException(503, "伺服器尚未設定 Supabase 服務金鑰")
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{supabase_url}/rest/v1/rpc/{fn}",
+        data=body,
+        method="POST",
+        headers={
+            "apikey": service_key,
+            "Authorization": f"Bearer {service_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode() or "null")
+    except urllib.error.HTTPError as e:
+        detail = (e.read() or b"").decode(errors="ignore")[:200]
+        raise HTTPException(502, f"帳務服務錯誤:{detail}")
+    except Exception as e:
+        raise HTTPException(502, f"帳務服務連線失敗:{str(e)[:120]}")
+
+
+def _sb_balance(user_id: str) -> int:
+    """以 service_role 讀某使用者的剩餘 credits"""
+    _, supabase_url, service_key = _paid_env()
+    if not supabase_url or not service_key:
+        raise HTTPException(503, "伺服器尚未設定 Supabase 服務金鑰")
+    url = (f"{supabase_url}/rest/v1/credit_balances"
+           f"?user_id=eq.{user_id}&select=remaining_credits")
+    req = urllib.request.Request(url, headers={
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            rows = json.loads(r.read().decode() or "[]")
+    except Exception as e:
+        raise HTTPException(502, f"讀取額度失敗:{str(e)[:120]}")
+    return int(rows[0]["remaining_credits"]) if rows else 0
+
+
+def _ffprobe_seconds(path: str) -> float:
+    """後端量測音訊長度(絕不信任前端),回傳秒數"""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, timeout=60, check=True,
+        )
+        return float((out.stdout or b"0").decode().strip() or 0)
+    except Exception:
+        raise HTTPException(400, "無法讀取音檔長度,請確認是有效的音訊檔")
+
+
+def _whisper_transcribe(audio_path: str, api_key: str) -> str:
+    """呼叫 OpenAI Whisper 轉錄(以後端金鑰),回傳純文字"""
+    import httpx
+    with open(audio_path, "rb") as f:
+        files = {"file": ("audio.m4a", f, "audio/mp4")}
+        data = {"model": "whisper-1", "language": "zh", "response_format": "text"}
+        try:
+            resp = httpx.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files=files, data=data, timeout=600,
+            )
+        except Exception as e:
+            raise HTTPException(502, f"轉錄服務連線失敗:{str(e)[:120]}")
+    if resp.status_code != 200:
+        raise HTTPException(502, f"轉錄失敗:{resp.text[:200]}")
+    return resp.text.strip()
+
+
+@app.get("/api/me")
+def api_me(authorization: str | None = Header(None)):
+    uid = _verify_jwt(authorization)
+    credits = _sb_balance(uid)
+    return {"user_id": uid, "remaining_credits": credits,
+            "remaining_minutes": credits // 60}
+
+
+@app.post("/api/transcribe")
+def api_transcribe(
+    request: Request,
+    file: UploadFile = File(...),
+    authorization: str | None = Header(None),
+):
+    api_key, supabase_url, service_key = _paid_env()
+    if not (api_key and supabase_url and service_key):
+        raise HTTPException(503, "付費轉錄尚未啟用(伺服器未設定金鑰)")
+    rate_check("audio", request)
+    uid = _verify_jwt(authorization)
+
+    if not _audio_slots.acquire(blocking=False):
+        raise HTTPException(429, "伺服器忙碌中,請稍候一分鐘再試")
+    tmpdir = tempfile.mkdtemp(prefix="ytpaid-")
+    usage_id = None
+    try:
+        # 1) 存上傳檔(限制大小,邊寫邊擋超量)
+        raw = os.path.join(tmpdir, "upload")
+        size = 0
+        with open(raw, "wb") as out:
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_FILE_BYTES:
+                    raise HTTPException(413, "檔案超過 100 MB 上限")
+                out.write(chunk)
+        if size == 0:
+            raise HTTPException(400, "沒有收到音檔")
+
+        # 2) 後端量測長度並檢查上限
+        duration = _ffprobe_seconds(raw)
+        if duration <= 0:
+            raise HTTPException(400, "音檔長度為 0 或無法辨識")
+        if duration > MAX_CLIP_UPLOAD_SEC:
+            raise HTTPException(400, f"目前僅支援 {MAX_CLIP_UPLOAD_SEC // 60} 分鐘內的短音檔")
+        cost = int(math.ceil(duration))       # 1 秒 = 1 credit,預扣無條件進位
+
+        # 3) 原子預扣(service_role RPC)
+        res = _sb_rpc("reserve_transcription", {
+            "p_user_id": uid, "p_cost": cost,
+            "p_source_type": "upload", "p_source_name": (file.filename or "")[:200],
+            "p_duration": cost,
+        })
+        row = res[0] if isinstance(res, list) else res
+        if not row or not row.get("ok"):
+            reason = (row or {}).get("reason")
+            if reason == "insufficient_credits":
+                raise HTTPException(402, "剩餘額度不足,請儲值後再試")
+            if reason == "active_job_exists":
+                raise HTTPException(409, "已有一個轉錄任務進行中,請待完成後再試")
+            raise HTTPException(502, "預扣額度失敗,請稍後再試")
+        usage_id = row["usage_id"]
+
+        # 4) 轉 16k 單聲道 → Whisper 轉錄
+        m4a = os.path.join(tmpdir, "audio.m4a")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", raw,
+                 "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k",
+                 "-movflags", "+faststart", m4a],
+                check=True, timeout=600, capture_output=True,
+            )
+        except subprocess.CalledProcessError as e:
+            raise HTTPException(500, f"音訊轉檔失敗:{(e.stderr or b'').decode(errors='ignore')[:200]}")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "音訊轉檔逾時")
+
+        text = _whisper_transcribe(m4a, api_key)
+
+        # 5) 結算(實際秒數;Whisper 成本估算供監控)
+        cost_usd = round(duration / 60.0 * WHISPER_USD_PER_MIN, 6)
+        settle = _sb_rpc("complete_transcription", {
+            "p_usage_id": usage_id, "p_user_id": uid,
+            "p_actual_seconds": int(math.ceil(duration)), "p_cost_usd": cost_usd,
+        })
+        srow = settle[0] if isinstance(settle, list) else settle
+        remaining = (srow or {}).get("remaining")
+        if remaining is None:                 # 極少數:結算沒回餘額才補讀一次
+            remaining = _sb_balance(uid)
+        usage_id = None  # 已結算,finally 不再退款
+        return {"text": text, "remaining_credits": remaining,
+                "remaining_minutes": int(remaining) // 60}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"轉錄失敗:{str(e)[:200]}")
+    finally:
+        # 任務未結算就退回預扣(失敗退款,不吃使用者額度)
+        if usage_id is not None:
+            try:
+                _sb_rpc("fail_transcription", {
+                    "p_usage_id": usage_id, "p_user_id": uid, "p_reason": "server_error",
+                })
+            except Exception:
+                pass
+        _audio_slots.release()
+        shutil.rmtree(tmpdir, ignore_errors=True)
