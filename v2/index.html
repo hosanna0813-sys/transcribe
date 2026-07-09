@@ -109,6 +109,16 @@
       </section>
     </div>
 
+    <div class="card hidden" id="libErrCard">
+      <section>
+        <div class="step-head"><h2>登入元件載入失敗</h2></div>
+        <p class="hint">設定已就緒,但登入用的元件(Supabase 程式庫)沒載入成功。
+        通常是<b>瀏覽器快取到舊版</b>或網路暫時不穩。請<b>強制重新整理</b>頁面:
+        Windows 按 <code>Ctrl+Shift+R</code>、Mac 按 <code>Cmd+Shift+R</code>;若仍不行,
+        請檢查網路或稍後再試。</p>
+      </section>
+    </div>
+
     <div class="card hidden" id="loadingCard">
       <section><p class="hint">載入中……</p></section>
     </div>
@@ -180,8 +190,12 @@
       try{localStorage.setItem('tw_mode',next);}catch(e){}
     });
 
-    if(!SUPABASE_CONFIG.url||!SUPABASE_CONFIG.anonKey||typeof supabase==='undefined'){
-      show('configCard');
+    if(!SUPABASE_CONFIG.url||!SUPABASE_CONFIG.anonKey){
+      show('configCard');       // 真的還沒填設定
+      return;
+    }
+    if(typeof supabase==='undefined'){
+      show('libErrCard');        // 設定有填,但 Supabase 程式庫沒載入(多半是快取舊版)
       return;
     }
 
