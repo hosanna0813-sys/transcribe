@@ -91,6 +91,8 @@
     font-family:inherit;font-size:.82rem;margin-right:10px;padding:6px 12px;cursor:pointer;
     border:1px solid var(--line);border-radius:var(--radius-s);background:var(--bg);color:var(--ink);
   }
+  .opt-row{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:.84rem;cursor:pointer;line-height:1.5}
+  .opt-row input{margin-top:3px;accent-color:var(--accent);width:15px;height:15px;flex:none}
   .or-sep{text-align:center;color:var(--muted);font-size:.78rem;margin:12px 0 8px;position:relative}
   .trim2{display:flex;gap:12px;margin-top:8px;flex-wrap:wrap}
   .trim2 label{display:flex;align-items:center;gap:6px;font-size:.76rem;color:var(--muted);margin:0}
@@ -182,6 +184,8 @@
           <label>起點(選填)<input type="text" id="ytStart" placeholder="0:00" autocomplete="off"></label>
           <label>終點(選填)<input type="text" id="ytEnd" placeholder="到結尾" autocomplete="off"></label>
         </div>
+        <label class="opt-row"><input type="checkbox" id="optCorrect" checked>
+          <span>轉錄後用 AI 校正逐字稿(修正錯字、標點;不額外收費)</span></label>
         <button class="primary" id="transcribeBtn">開始轉錄</button>
         <div id="transcribeMsg"></div>
         <div id="progBox" class="hidden">
@@ -341,6 +345,7 @@
       }else{
         form.append('file',f,f.name);
       }
+      if($('optCorrect').checked)form.append('correct','true');
       setBusy(true);hide('resultBox');
       setMsg($('transcribeMsg'),'');
       showProg(0,url?'從 YouTube 取得音訊中……(伺服器/家用電腦喚醒可能需 30–60 秒)':'上傳中……');
