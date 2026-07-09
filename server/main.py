@@ -425,6 +425,7 @@ import urllib.request
 import urllib.error
 
 from fastapi import File, Form, Header, UploadFile
+from pydantic import BaseModel
 
 MAX_CLIP_UPLOAD_SEC = 10 * 60          # 階段二短音檔上限 10 分鐘
 WHISPER_USD_PER_MIN = 0.006            # Whisper 定價(供成本估算/監控)
@@ -542,6 +543,24 @@ def _sb_balance(user_id: str) -> int:
     return int(rows[0]["remaining_credits"]) if rows else 0
 
 
+def _sb_role(user_id: str) -> str:
+    """以 service_role 讀某使用者的 role(user / admin)"""
+    _, supabase_url, service_key = _paid_env()
+    if not supabase_url or not service_key:
+        raise HTTPException(503, "伺服器尚未設定 Supabase 服務金鑰")
+    url = f"{supabase_url}/rest/v1/profiles?id=eq.{user_id}&select=role"
+    req = urllib.request.Request(url, headers={
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            rows = json.loads(r.read().decode() or "[]")
+    except Exception as e:
+        raise HTTPException(502, f"讀取身分失敗:{str(e)[:120]}")
+    return (rows[0].get("role") if rows else None) or "user"
+
+
 def _ffprobe_seconds(path: str) -> float:
     """後端量測音訊長度(絕不信任前端),回傳秒數"""
     try:
@@ -578,8 +597,47 @@ def _whisper_transcribe(audio_path: str, api_key: str) -> str:
 def api_me(authorization: str | None = Header(None)):
     uid = _verify_jwt(authorization)
     credits = _sb_balance(uid)
-    return {"user_id": uid, "remaining_credits": credits,
-            "remaining_minutes": credits // 60}
+    return {"user_id": uid, "role": _sb_role(uid),
+            "remaining_credits": credits, "remaining_minutes": credits // 60}
+
+
+class _AddCreditsBody(BaseModel):
+    email: str
+    minutes: int
+    reason: str | None = None
+    idempotency_key: str | None = None
+
+
+@app.post("/api/admin/add-credits")
+def api_admin_add_credits(body: _AddCreditsBody, authorization: str | None = Header(None)):
+    _, supabase_url, service_key = _paid_env()
+    if not (supabase_url and service_key):
+        raise HTTPException(503, "服務尚未設定(缺 Supabase 金鑰)")
+    uid = _verify_jwt(authorization)
+    if _sb_role(uid) != "admin":            # 後端再次把關,絕不信任前端
+        raise HTTPException(403, "沒有權限:僅管理員可加值")
+    if not body.email or body.minutes is None or body.minutes <= 0:
+        raise HTTPException(400, "請提供有效的 Email 與正整數分鐘數")
+    credits = int(body.minutes) * 60        # 前端以分鐘輸入,存為 credits(秒)
+    res = _sb_rpc("admin_add_credits", {
+        "p_caller": uid, "p_email": body.email.strip(), "p_amount": credits,
+        "p_reason": (body.reason or "").strip() or "admin 加值",
+        "p_idem": body.idempotency_key or "",
+    })
+    row = res[0] if isinstance(res, list) else res
+    if not row or not row.get("ok"):
+        reason = (row or {}).get("reason")
+        if reason == "user_not_found":
+            raise HTTPException(404, "找不到這個 Email 的使用者(對方需先登入過一次)")
+        if reason == "not_admin":
+            raise HTTPException(403, "沒有權限:僅管理員可加值")
+        if reason == "invalid_amount":
+            raise HTTPException(400, "分鐘數不正確")
+        raise HTTPException(502, "加值失敗,請稍後再試")
+    remaining = row.get("remaining") or 0
+    return {"ok": True, "target_email": row.get("target_email"),
+            "remaining_credits": remaining, "remaining_minutes": int(remaining) // 60,
+            "duplicate": row.get("reason") == "duplicate"}
 
 
 @app.post("/api/transcribe")
