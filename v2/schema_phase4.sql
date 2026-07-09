@@ -42,7 +42,7 @@ begin
         where ct.idempotency_key = p_idem limit 1;
       select remaining_credits into v_balance from public.credit_balances where user_id = v_target;
       return query select true, v_balance,
-        (select email from auth.users where id = v_target), 'duplicate';
+        (select email::text from auth.users where id = v_target), 'duplicate';
       return;
     end if;
   end if;
@@ -74,12 +74,12 @@ begin
      where user_id = v_target
     returning remaining_credits into v_balance;
     return query select true, v_balance,
-      (select email from auth.users where id = v_target), 'duplicate';
+      (select email::text from auth.users where id = v_target), 'duplicate';
     return;
   end;
 
   return query select true, v_balance,
-    (select email from auth.users where id = v_target), null::text;
+    (select email::text from auth.users where id = v_target), null::text;
 end;
 $$;
 
