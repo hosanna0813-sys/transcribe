@@ -80,12 +80,46 @@ await sb.from('credit_balances').update({remaining_credits: 999999}).eq('user_id
 
 ---
 
+# 階段二設定:上傳短音檔 → 轉錄 → 扣點
+
+階段二讓使用者能**上傳短音檔(10 分鐘內),由後端用你的 OpenAI 金鑰轉錄,並依
+音檔長度扣除 Credits**。轉錄在 Render 雲端後端執行,你的金鑰只放後端、不進前端。
+
+### A. 建立扣點函式(Supabase)
+到 **SQL Editor → New query**,貼上 `v2/schema_phase2.sql` 整份,按 **Run**。
+(這會建立 reserve / complete / fail 三個原子扣點函式,只允許後端 service_role 呼叫。)
+
+### B. 在 Render 後台設三個環境變數
+到 Render 的這個服務 → **Environment** → 新增(值都不會進 git):
+| 變數名 | 值 |
+| --- | --- |
+| `OPENAI_API_KEY` | 你的 OpenAI 金鑰(`sk-...`),會付所有轉錄費用 |
+| `SUPABASE_URL` | `https://ocfyfwcdpzllkmbkldtv.supabase.co`(你的 Project URL) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase → Project Settings → API 的 **service_role secret** 金鑰 |
+> ⚠️ `service_role` 是**最高權限機密金鑰**,只能放 Render 後台,絕不可貼進前端或 git。
+
+設定後 Render 會自動重新部署(約幾分鐘)。未設定前付費轉錄會回「尚未啟用」,但免費版 YouTube 服務照常。
+
+### C. 測試
+1. 到 `.../v2/` 登入(確保有測試額度,不夠就用階段一的 SQL 加值)。
+2. 在「上傳音檔轉錄」選一個 10 分鐘內的音檔 → 按「開始轉錄」。
+   （Render 免費方案若休眠,第一次會等 30–60 秒喚醒。）
+3. 應看到逐字稿結果,且上方「剩餘分鐘」對應減少(1 秒 = 1 credit)。
+4. 驗證扣點:到 Supabase Table Editor 看 `credit_transactions`(一筆 deduct)與
+   `usage_logs`(status=completed)。
+
+### 常見問題
+- **「付費轉錄尚未啟用」** → Render 三個環境變數還沒設好或還在部署。
+- **「剩餘額度不足」** → 用階段一的 SQL 加值,或該音檔太長超過額度。
+- **一直轉圈很久** → Render 免費方案冷啟動較慢,第一次請耐心等;之後會快。
+
+---
+
 ## 接下來的階段(尚未實作)
 
 | 階段 | 內容 |
 | --- | --- |
-| 二 | OpenAI 後端化;短音檔跑通「預扣 → 轉錄 → 結算/退款」 |
-| 三 | 長音檔背景排程 + 切段;音檔任務後自動刪除、24 小時清理 |
-| 四 | 使用紀錄列表;admin 手動加值介面;流水帳;使用者刪除紀錄 |
+| 三 | YouTube 來源;長音檔背景排程 + 切段;音檔任務後自動刪除、24 小時清理 |
+| 四 | 使用紀錄列表;admin 手動加值介面;流水帳查詢;使用者刪除紀錄;GPT 校正 |
 | 五 | 每日免費額度、長度上限、rate limit、冪等鍵、watchdog 退款 |
 | 六 | payments 多金流介面;每日監控報表;價格後端化 |
