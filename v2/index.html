@@ -102,6 +102,17 @@
   .bar2{height:8px;background:var(--line);border-radius:99px;overflow:hidden}
   .bar2 i{display:block;height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .4s}
   .prog-txt{font-size:.8rem;color:var(--muted);margin-top:7px}
+  .hist{list-style:none;margin-top:6px}
+  .hist li{border:1px solid var(--line);border-radius:var(--radius-s);padding:9px 11px;margin-bottom:6px;font-size:.82rem}
+  .hist .h-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .hist .h-nm{flex:1;min-width:0;word-break:break-all;line-height:1.4}
+  .hist .h-meta{color:var(--muted);font-size:.74rem;margin-top:3px}
+  .hist .h-st{font-size:.7rem;padding:1px 7px;border-radius:99px;white-space:nowrap;flex:none}
+  .hist .h-st.ok{background:var(--ok-soft);color:var(--ok)}
+  .hist .h-st.err{background:var(--err-soft);color:var(--err)}
+  .hist .h-st.run{background:var(--accent-soft);color:var(--accent)}
+  .hist .h-del{border:none;background:none;color:var(--muted);text-decoration:underline;cursor:pointer;font-size:.72rem;font-family:inherit;padding:0;margin-top:5px}
+  .hist .h-del:hover{color:var(--err)}
   .result{margin-top:14px}
   .result.hidden{display:none}
   .result-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;font-size:.85rem;font-weight:500}
@@ -202,6 +213,14 @@
         </div>
         <p class="hint">轉錄費用依音檔長度扣除(1 秒 = 1 credit;60 秒 = 1 分鐘),最長 3 小時。
         長音檔會自動分段處理,送出後可留在頁面看進度;YouTube 需站長家用電腦開著。</p>
+      </section>
+      <section>
+        <div class="step-head" style="justify-content:space-between">
+          <h2>使用紀錄</h2>
+          <button class="ghost" id="histRefresh" style="padding:5px 12px;font-size:.78rem">重新整理</button>
+        </div>
+        <ul id="histList" class="hist"></ul>
+        <p class="hint" id="histEmpty">尚無紀錄。</p>
       </section>
       <section id="adminSection" class="hidden">
         <div class="step-head"><h2>管理員:為帳號加值</h2></div>
@@ -304,6 +323,7 @@
         .then(function(res){ setCredits((res.data&&res.data.remaining_credits)||0); },
               function(){ $('minNum').textContent='0'; $('creditLine').textContent='無法讀取額度,請稍後重試。'; });
       loadFree();
+      loadHistory();
     }
     /* 今日免費剩餘(需問後端,因為免費上限存在後端);後端休眠時忽略,不影響其他 */
     function loadFree(){
@@ -318,6 +338,51 @@
         }else{hide('freeLine');}
       }).catch(function(){});
     }
+
+    /* ---------- 使用紀錄(RLS 直接讀自己那筆;刪除走 security definer RPC) ---------- */
+    function fmtDate(iso){
+      try{var d=new Date(iso);function p(n){return(n<10?'0':'')+n;}
+        return (d.getMonth()+1)+'/'+d.getDate()+' '+p(d.getHours())+':'+p(d.getMinutes());
+      }catch(e){return '';}
+    }
+    function fmtLen(sec){sec=Math.round(sec||0);var m=Math.floor(sec/60),s=sec%60;return m+':'+(s<10?'0':'')+s;}
+    function loadHistory(){
+      sb.from('usage_logs')
+        .select('id,created_at,source_type,source_name,youtube_url,duration_seconds,credits_charged,free_credits,status')
+        .order('created_at',{ascending:false}).limit(20)
+        .then(function(res){renderHistory((res.data)||[]);},function(){renderHistory(null);});
+    }
+    function renderHistory(rows){
+      var ul=$('histList');ul.innerHTML='';
+      if(rows===null){$('histEmpty').textContent='無法讀取紀錄。';show('histEmpty');return;}
+      if(!rows.length){$('histEmpty').textContent='尚無紀錄。';show('histEmpty');return;}
+      hide('histEmpty');
+      rows.forEach(function(r){
+        var li=document.createElement('li');
+        var stCls=r.status==='completed'?'ok':(r.status==='failed'||r.status==='refunded'?'err':'run');
+        var stTxt=r.status==='completed'?'完成':(r.status==='failed'?'失敗':(r.status==='refunded'?'已退款':'處理中'));
+        var name=r.source_name||(r.source_type==='youtube'?'YouTube 影片':'(已刪除內容)');
+        var charged=r.credits_charged||0, free=r.free_credits||0, paid=Math.max(0,charged-free);
+        var costTxt=charged?('花費 '+Math.round(charged/60)+' 分'+(free?('(含免費 '+Math.round(free/60)+' 分)'):'')):'';
+        var top=document.createElement('div');top.className='h-top';
+        top.innerHTML='<span class="h-nm">'+escapeHtml(name)+'</span><span class="h-st '+stCls+'">'+stTxt+'</span>';
+        var meta=document.createElement('div');meta.className='h-meta';
+        meta.textContent=fmtDate(r.created_at)+' · 長度 '+fmtLen(r.duration_seconds)+(costTxt?(' · '+costTxt):'');
+        li.appendChild(top);li.appendChild(meta);
+        if(r.source_name||r.youtube_url){
+          var del=document.createElement('button');del.className='h-del';del.textContent='刪除此紀錄內容';
+          del.addEventListener('click',function(){
+            if(!confirm('刪除後此紀錄的檔名/網址將清空(帳務仍保留),無法復原。確定?'))return;
+            del.disabled=true;del.textContent='刪除中…';
+            sb.rpc('delete_usage_content',{p_usage_id:r.id}).then(function(){loadHistory();},
+              function(){del.disabled=false;del.textContent='刪除失敗,重試';});
+          });
+          li.appendChild(del);
+        }
+        ul.appendChild(li);
+      });
+    }
+    $('histRefresh').addEventListener('click',loadHistory);
 
     /* ---------- 轉錄任務:送出 /api/jobs → 輪詢 /api/jobs/{id} ---------- */
     var fileInput=$('audioFile'),transcribeBtn=$('transcribeBtn');
@@ -410,7 +475,7 @@
           setMsg($('transcribeMsg'),'轉錄完成 ✓','ok');
           $('resultText').value=d.text||'';show('resultBox');
           if(typeof d.remaining_credits==='number')setCredits(d.remaining_credits);
-          loadFree();   // 免費額度可能被用掉,刷新顯示
+          loadFree();loadHistory();   // 免費額度/紀錄刷新
         }else{ // failed
           try{localStorage.removeItem('tw_v2_job');}catch(e){}
           hide('progBox');setBusy(false);
