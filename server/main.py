@@ -23,7 +23,7 @@ import yt_dlp
 from yt_dlp.utils import download_range_func
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from starlette.background import BackgroundTask
 
 MAX_VIDEO_SEC = 3 * 3600      # 影片長度上限 3 小時
@@ -1163,3 +1163,153 @@ def _watchdog_loop():
 
 threading.Thread(target=_cleanup_loop, daemon=True).start()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
+
+
+# =============================================================
+# 計費版 v2 金流:綠界 ECPay 全方位金流(AIO)線上儲值
+#
+# 環境變數(未設定則用綠界「公開測試值」,可直接在測試環境試):
+#   ECPAY_MERCHANT_ID / ECPAY_HASH_KEY / ECPAY_HASH_IV
+#   ECPAY_ENV(stage=測試 / production=正式)
+#   PUBLIC_BASE_URL(本後端公開網址,組 ReturnURL)
+#   SITE_V2_URL(前端 v2 網址,付款後導回)
+# =============================================================
+import hashlib
+import random
+
+# 綠界公開測試帳號(官方文件提供,任何人可用於測試環境)
+_ECPAY_TEST = {"mid": "2000132", "key": "5294y06JbISpM5x9", "iv": "v77hoKGq4kWxNNIS"}
+_ECPAY_AIO = {
+    "stage": "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5",
+    "production": "https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5",
+}
+
+# 儲值方案(價格由營運者自行調整;1 分鐘 = 60 credits)
+PAY_PACKAGES = [
+    {"id": "p100", "amount_twd": 100, "minutes": 60},
+    {"id": "p300", "amount_twd": 300, "minutes": 200},
+    {"id": "p500", "amount_twd": 500, "minutes": 360},
+]
+
+
+def _ecpay_conf():
+    mid = os.environ.get("ECPAY_MERCHANT_ID") or _ECPAY_TEST["mid"]
+    key = os.environ.get("ECPAY_HASH_KEY") or _ECPAY_TEST["key"]
+    iv = os.environ.get("ECPAY_HASH_IV") or _ECPAY_TEST["iv"]
+    env = os.environ.get("ECPAY_ENV", "stage")
+    return mid, key, iv, ("production" if env == "production" else "stage")
+
+
+def _ecpay_checkmac(params: dict) -> str:
+    """依綠界規格計算 CheckMacValue(EncryptType=1,SHA256)"""
+    _, key, iv, _ = _ecpay_conf()
+    items = sorted(((k, v) for k, v in params.items() if k != "CheckMacValue"),
+                   key=lambda x: x[0].lower())
+    raw = "HashKey=" + key + "&" + "&".join(f"{k}={v}" for k, v in items) + "&HashIV=" + iv
+    enc = urllib.parse.quote_plus(raw).lower()
+    for a, b in [("%2d", "-"), ("%5f", "_"), ("%2e", "."), ("%21", "!"),
+                 ("%2a", "*"), ("%28", "("), ("%29", ")"), ("%20", "+")]:
+        enc = enc.replace(a, b)
+    return hashlib.sha256(enc.encode()).hexdigest().upper()
+
+
+def _sb_insert_payment(user_id, amount, credits, mtn):
+    """建立一筆 pending 付款,回傳 id"""
+    _, supabase_url, service_key = _paid_env()
+    body = json.dumps({
+        "user_id": user_id, "provider": "ecpay", "amount": amount, "currency": "TWD",
+        "credits_added": credits, "status": "pending", "merchant_trade_no": mtn,
+    }).encode()
+    req = urllib.request.Request(
+        f"{supabase_url}/rest/v1/payments", data=body, method="POST",
+        headers={"apikey": service_key, "Authorization": f"Bearer {service_key}",
+                 "Content-Type": "application/json", "Prefer": "return=representation"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        rows = json.loads(r.read().decode() or "[]")
+    return rows[0]["id"]
+
+
+def _sb_payment_by_mtn(mtn: str):
+    """以 MerchantTradeNo 找付款(回傳 dict 或 None)"""
+    _, supabase_url, service_key = _paid_env()
+    url = (f"{supabase_url}/rest/v1/payments?merchant_trade_no=eq."
+           f"{urllib.parse.quote(mtn, safe='')}&select=id,status,credits_added")
+    req = urllib.request.Request(url, headers={
+        "apikey": service_key, "Authorization": f"Bearer {service_key}"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        rows = json.loads(r.read().decode() or "[]")
+    return rows[0] if rows else None
+
+
+@app.get("/api/pay/packages")
+def api_pay_packages():
+    return {"packages": PAY_PACKAGES, "currency": "TWD"}
+
+
+@app.post("/api/pay/create")
+def api_pay_create(request: Request, package_id: str = Form(...),
+                   authorization: str | None = Header(None)):
+    _, supabase_url, service_key = _paid_env()
+    if not (supabase_url and service_key):
+        raise HTTPException(503, "服務尚未設定")
+    uid = _verify_jwt(authorization)
+    pkg = next((p for p in PAY_PACKAGES if p["id"] == package_id), None)
+    if not pkg:
+        raise HTTPException(400, "無效的方案")
+
+    mid, _, _, env = _ecpay_conf()
+    credits = pkg["minutes"] * 60
+    # MerchantTradeNo:≤20 英數且唯一
+    mtn = ("T" + format(int(time.time() * 1000), "x")
+           + "".join(random.choice("0123456789abcdef") for _ in range(4)))[:20]
+    payment_id = _sb_insert_payment(uid, pkg["amount_twd"], credits, mtn)
+
+    base = (os.environ.get("PUBLIC_BASE_URL") or str(request.base_url)).rstrip("/")
+    params = {
+        "MerchantID": mid,
+        "MerchantTradeNo": mtn,
+        "MerchantTradeDate": datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d %H:%M:%S"),
+        "PaymentType": "aio",
+        "TotalAmount": str(pkg["amount_twd"]),
+        "TradeDesc": "credits topup",
+        "ItemName": f"轉錄額度 {pkg['minutes']} 分鐘",
+        "ReturnURL": base + "/api/pay/ecpay/callback",
+        "ClientBackURL": base + "/api/pay/ecpay/return",
+        "ChoosePayment": "ALL",
+        "EncryptType": "1",
+    }
+    params["CheckMacValue"] = _ecpay_checkmac(params)
+    return {"action": _ECPAY_AIO[env], "params": params, "payment_id": payment_id}
+
+
+@app.post("/api/pay/ecpay/callback")
+async def api_pay_callback(request: Request):
+    """綠界伺服器對伺服器付款結果通知;驗章成功且付款成功才入帳,回應 1|OK"""
+    form = await request.form()
+    data = {k: str(v) for k, v in form.items()}
+    mac = data.get("CheckMacValue", "")
+    if not mac or _ecpay_checkmac(data) != mac.upper():
+        return PlainTextResponse("0|CheckMacValue error", status_code=400)
+    if data.get("RtnCode") != "1":
+        return PlainTextResponse("1|OK")   # 收到但非成功,不入帳
+    mtn = data.get("MerchantTradeNo", "")
+    pay = _sb_payment_by_mtn(mtn)
+    if not pay:
+        return PlainTextResponse("0|order not found", status_code=400)
+    try:
+        _sb_rpc("credit_payment", {
+            "p_payment_id": pay["id"],
+            "p_provider_txn": data.get("TradeNo") or mtn,
+            "p_raw": data,
+        })
+    except Exception:
+        return PlainTextResponse("0|credit error", status_code=500)
+    return PlainTextResponse("1|OK")
+
+
+@app.get("/api/pay/ecpay/return")
+def api_pay_return():
+    """使用者付款後瀏覽器導回 → 轉回前端頁(入帳以 callback 為準)"""
+    site = os.environ.get("SITE_V2_URL") or "../"
+    sep = "&" if "?" in site else "?"
+    return RedirectResponse(site + sep + "paid=1")

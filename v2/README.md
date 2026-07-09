@@ -195,11 +195,42 @@ SQL Editor → 貼上 `v2/schema_phase3.sql` 整份 → **Run**。
 
 **設定**:Supabase SQL Editor 跑 `v2/schema_history.sql`(建立刪除函式)。列表本身無需設定。
 
-## 接下來的階段(尚未實作)
+# 金流:綠界 ECPay 線上儲值
 
-| 階段 | 內容 |
+使用者可在帳號頁的「儲值」區塊選方案 → 線上刷卡 / LINE Pay 付款 → 額度自動入帳。
+入帳只由後端在「驗證綠界通知簽章成功」後處理,防偽造、防重複。
+
+### A. 建立入帳函式(Supabase)
+SQL Editor → 貼上 `v2/schema_pay.sql` 整份 → **Run**。
+
+### B. 先用「測試環境」驗證(不用先申請帳號)
+未設定綠界環境變數時,後端會用**綠界公開測試值**。你只要在 Render 設兩個網址即可測:
+| 變數名 | 值 |
 | --- | --- |
-| 六 | payments 多金流介面(綠界/Stripe);每日監控報表;價格後端化 |
+| `PUBLIC_BASE_URL` | 你的後端網址,例 `https://transcribe-yt-j7kv.onrender.com` |
+| `SITE_V2_URL` | 你的 v2 網址,例 `https://hosanna0813-sys.github.io/transcribe/v2/` |
+
+到 `.../v2/` 登入 → 點一個儲值方案 → 會跳到綠界**測試**結帳頁 →
+用綠界測試信用卡(卡號 `4311-9522-2222-2222`、有效期任意未來、安全碼任意 3 碼)付款 →
+幾秒後回到網站,餘額會增加、`payments` 出現一筆 `paid`。
+
+### C. 正式上線(收真的錢)
+1. 到綠界 <https://www.ecpay.com.tw> 申請**個人**特約商店,拿到正式 MerchantID / HashKey / HashIV。
+2. Render 設定:`ECPAY_MERCHANT_ID`、`ECPAY_HASH_KEY`、`ECPAY_HASH_IV`,並把 `ECPAY_ENV` 設為 `production`。
+3. 在綠界後台把「付款完成通知網址(ReturnURL)」相關設定指向你的 `PUBLIC_BASE_URL`。
+
+### 說明
+- **儲值方案價格**寫在後端 `server/main.py` 的 `PAY_PACKAGES`(先放佔位價格,你自行調整);
+  前端自動顯示。
+- 入帳以綠界**伺服器通知**為準(瀏覽器導回只是顯示);同一筆重送不會重複加值。
+- 每筆付款都寫入 `payments` 與 `credit_transactions`,可完整對帳。
+
+> ⚠️ 這是真實金錢功能:請務必**先在測試環境完整驗證**(付款→入帳→餘額正確)再切正式。
+
+---
+
+## 接下來(選用)
+- 每日成本/營收監控報表;價格改為資料表管理(目前寫在後端常數,改價要改一行 + 重新部署)。
 
 ---
 

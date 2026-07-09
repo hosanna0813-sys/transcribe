@@ -102,6 +102,13 @@
   .bar2{height:8px;background:var(--line);border-radius:99px;overflow:hidden}
   .bar2 i{display:block;height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .4s}
   .prog-txt{font-size:.8rem;color:var(--muted);margin-top:7px}
+  .pkgs{display:flex;gap:10px;flex-wrap:wrap;margin-top:4px}
+  .pkg{flex:1;min-width:120px;border:1px solid var(--line);border-radius:var(--radius-s);
+    background:var(--card);cursor:pointer;padding:12px;text-align:center;font-family:inherit;transition:.15s}
+  .pkg:hover:not(:disabled){border-color:var(--accent);background:var(--accent-soft)}
+  .pkg:disabled{opacity:.5;cursor:default}
+  .pkg .p-amt{font-size:1.1rem;font-weight:700;color:var(--accent)}
+  .pkg .p-min{font-size:.78rem;color:var(--muted);margin-top:2px}
   .hist{list-style:none;margin-top:6px}
   .hist li{border:1px solid var(--line);border-radius:var(--radius-s);padding:9px 11px;margin-bottom:6px;font-size:.82rem}
   .hist .h-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -184,6 +191,12 @@
         <div class="balance"><span class="num" id="minNum">–</span><span class="unit">分鐘</span></div>
         <p class="hint" id="creditLine"></p>
         <p class="hint hidden" id="freeLine"></p>
+      </section>
+      <section id="topupSection" class="hidden">
+        <div class="step-head"><h2>儲值</h2></div>
+        <div id="payMsg"></div>
+        <div id="pkgList" class="pkgs"></div>
+        <p class="hint">線上刷卡 / LINE Pay 付款,額度自動入帳(付款完成後約數秒到帳)。</p>
       </section>
       <section>
         <div class="step-head"><h2>轉錄(上傳檔案或 YouTube)</h2></div>
@@ -324,6 +337,7 @@
               function(){ $('minNum').textContent='0'; $('creditLine').textContent='無法讀取額度,請稍後重試。'; });
       loadFree();
       loadHistory();
+      loadPackages();
     }
     /* 今日免費剩餘(需問後端,因為免費上限存在後端);後端休眠時忽略,不影響其他 */
     function loadFree(){
@@ -337,6 +351,47 @@
           show('freeLine');
         }else{hide('freeLine');}
       }).catch(function(){});
+    }
+
+    /* ---------- 儲值(綠界 ECPay) ---------- */
+    function loadPackages(){
+      fetch(BACKEND_URL+'/api/pay/packages',{headers:{'ngrok-skip-browser-warning':'1'}})
+        .then(function(res){return res.ok?res.json():null;})
+        .then(function(d){
+          if(!d||!d.packages||!d.packages.length){hide('topupSection');return;}
+          var box=$('pkgList');box.innerHTML='';
+          d.packages.forEach(function(p){
+            var b=document.createElement('button');b.type='button';b.className='pkg';
+            b.innerHTML='<div class="p-amt">NT$'+p.amount_twd+'</div><div class="p-min">'+p.minutes+' 分鐘</div>';
+            b.addEventListener('click',function(){startPay(p.id,b);});
+            box.appendChild(b);
+          });
+          show('topupSection');
+        }).catch(function(){hide('topupSection');});
+    }
+    function startPay(pkgId,btn){
+      var all=document.querySelectorAll('.pkg');all.forEach(function(x){x.disabled=true;});
+      setMsg($('payMsg'),'前往付款頁面……','ok');
+      sb.auth.getSession().then(function(r){
+        var tk=r.data.session&&r.data.session.access_token;
+        if(!tk)throw new Error('登入已過期,請重新登入');
+        var fd=new FormData();fd.append('package_id',pkgId);
+        return fetch(BACKEND_URL+'/api/pay/create',{method:'POST',
+          headers:{'Authorization':'Bearer '+tk,'ngrok-skip-browser-warning':'1'},body:fd});
+      }).then(function(res){return res.text().then(function(t){
+        var d;try{d=JSON.parse(t);}catch(e){d={};}
+        if(!res.ok)throw new Error(d.detail||('建立付款失敗(HTTP '+res.status+')'));return d;});
+      }).then(function(d){
+        /* 動態建表單 POST 到綠界結帳頁 */
+        var f=document.createElement('form');f.method='POST';f.action=d.action;
+        Object.keys(d.params).forEach(function(k){
+          var i=document.createElement('input');i.type='hidden';i.name=k;i.value=d.params[k];f.appendChild(i);
+        });
+        document.body.appendChild(f);f.submit();
+      }).catch(function(err){
+        setMsg($('payMsg'),escapeHtml(err&&err.message||String(err)),'err');
+        all.forEach(function(x){x.disabled=false;});
+      });
     }
 
     /* ---------- 使用紀錄(RLS 直接讀自己那筆;刪除走 security definer RPC) ---------- */
@@ -562,6 +617,18 @@
     $('email').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();$('sendLink').click();}});
 
     $('logoutBtn').addEventListener('click',function(){sb.auth.signOut();});
+
+    /* 綠界付款導回:顯示提示,並過幾秒刷新餘額(真正入帳由後端 callback 處理,可能有幾秒延遲) */
+    if(/[?&]paid=1/.test(window.location.search)){
+      setTimeout(function(){
+        if($('payMsg'))setMsg($('payMsg'),'付款完成,額度處理中……若餘額未更新,稍候重新整理即可。','ok');
+      },300);
+      var tries=0,iv=setInterval(function(){
+        tries++;sb.auth.getUser().then(function(u){if(u.data.user)loadBalance(u.data.user.id);});
+        if(tries>=5)clearInterval(iv);
+      },3000);
+      try{history.replaceState(null,'',window.location.pathname);}catch(e){}
+    }
 
     show('loadingCard');
     sb.auth.getSession().then(function(res){render(res.data.session);});
