@@ -164,8 +164,8 @@
       </section>
       <section>
         <div class="step-head"><h2>上傳音檔轉錄</h2></div>
-        <label class="field" for="audioFile">選擇音檔(目前支援 10 分鐘內的短音檔)</label>
-        <input type="file" id="audioFile" accept="audio/*,video/*">
+        <label class="field" for="audioFile">選擇音檔或影片檔(10 分鐘內;影片會自動抽取聲音,檔案上限 100 MB)</label>
+        <input type="file" id="audioFile">
         <button class="primary" id="transcribeBtn" disabled>開始轉錄</button>
         <div id="transcribeMsg"></div>
         <div id="resultBox" class="result hidden">
