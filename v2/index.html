@@ -54,7 +54,7 @@
   .step-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
   .step-head h2{font-size:1rem;font-weight:700;letter-spacing:.03em}
   label.field{display:block;font-size:.8rem;color:var(--muted);margin-bottom:5px}
-  input[type=email]{
+  input[type=email],input[type=text],input[type=number]{
     width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:var(--radius-s);
     font-family:inherit;font-size:.92rem;color:var(--ink);background:var(--card);
   }
@@ -178,6 +178,18 @@
         <p class="hint">轉錄費用依音檔長度扣除(1 秒 = 1 credit;60 秒 = 1 分鐘)。
         目前為初版:僅單一短音檔、尚無 YouTube 與校正功能,後續版本陸續開放。</p>
       </section>
+      <section id="adminSection" class="hidden">
+        <div class="step-head"><h2>管理員:為帳號加值</h2></div>
+        <label class="field" for="addEmail">使用者 Email(對方需先登入過一次)</label>
+        <input type="email" id="addEmail" placeholder="user@example.com" autocomplete="off">
+        <label class="field" for="addMinutes" style="margin-top:10px">加值分鐘數</label>
+        <input type="number" id="addMinutes" min="1" step="1" placeholder="例如 60">
+        <label class="field" for="addReason" style="margin-top:10px">備註(選填)</label>
+        <input type="text" id="addReason" placeholder="例如:2026-07 儲值 NT$100" autocomplete="off">
+        <button class="primary" id="addBtn">加值</button>
+        <div id="addMsg"></div>
+        <p class="hint">此區塊只有管理員看得到。加值會寫入交易紀錄,可到 Supabase 對帳。</p>
+      </section>
     </div>
 
     <p class="foot-note">
@@ -240,9 +252,19 @@
         hide('loginCard');show('accountCard');
         $('userEmail').textContent=session.user.email||'(未知)';
         loadBalance(session.user.id);
+        checkAdmin(session.user.id);
       }else{
-        hide('accountCard');show('loginCard');
+        hide('accountCard');show('loginCard');hide('adminSection');
       }
+    }
+
+    /* 讀自己的 role(RLS 只讓讀自己那筆);是 admin 才顯示加值區塊 */
+    function checkAdmin(uid){
+      sb.from('profiles').select('role').eq('id',uid).maybeSingle()
+        .then(function(res){
+          if(res.data&&res.data.role==='admin')show('adminSection');
+          else hide('adminSection');
+        },function(){hide('adminSection');});
     }
 
     function setCredits(credits){
@@ -306,6 +328,48 @@
       this.textContent='已複製';var b=this;setTimeout(function(){b.textContent='複製';},1500);
     });
     function escapeHtml(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+
+    /* ---------- 管理員加值(呼叫後端 /api/admin/add-credits) ---------- */
+    var addingBusy=false,addIdem=null;
+    $('addBtn').addEventListener('click',function(){
+      if(addingBusy)return;
+      var email=($('addEmail').value||'').trim();
+      var minutes=parseInt($('addMinutes').value,10);
+      var reason=($('addReason').value||'').trim();
+      if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){setMsg($('addMsg'),'請輸入有效的 Email。','err');return;}
+      if(!(minutes>0)){setMsg($('addMsg'),'請輸入正整數分鐘數。','err');return;}
+      /* 每次按下產生一組冪等鍵,網路重試不會重複加值;成功後清掉,下次再產生新的 */
+      if(!addIdem)addIdem=(window.crypto&&crypto.randomUUID)?crypto.randomUUID():('k-'+Date.now()+'-'+Math.random());
+      addingBusy=true;this.disabled=true;this.textContent='加值中…';setMsg($('addMsg'),'');
+      sb.auth.getSession().then(function(r){
+        var token=r.data.session&&r.data.session.access_token;
+        if(!token)throw new Error('登入已過期,請重新登入');
+        return fetch(BACKEND_URL+'/api/admin/add-credits',{
+          method:'POST',
+          headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json','ngrok-skip-browser-warning':'1'},
+          body:JSON.stringify({email:email,minutes:minutes,reason:reason,idempotency_key:addIdem})
+        });
+      }).then(function(res){
+        return res.text().then(function(t){
+          var d;try{d=JSON.parse(t);}catch(e){d={};}
+          if(!res.ok)throw new Error(d.detail||('加值失敗(HTTP '+res.status+')'));
+          return d;
+        });
+      }).then(function(d){
+        var mins=d.remaining_minutes,who=d.target_email||email;
+        setMsg($('addMsg'),(d.duplicate?'(已加值過,未重複)':'加值成功 ✓')+' — '+escapeHtml(who)+' 目前剩餘 '+mins+' 分鐘','ok');
+        addIdem=null;                       // 這筆完成,下次用新的冪等鍵
+        $('addMinutes').value='';
+        /* 若加值對象是自己,順手更新上方餘額 */
+        sb.auth.getUser().then(function(u){
+          if(u.data.user&&u.data.user.email&&who&&u.data.user.email.toLowerCase()===who.toLowerCase()&&typeof d.remaining_credits==='number')setCredits(d.remaining_credits);
+        });
+      }).catch(function(err){
+        setMsg($('addMsg'),escapeHtml(err&&err.message||String(err)),'err');
+      }).finally(function(){
+        addingBusy=false;$('addBtn').disabled=false;$('addBtn').textContent='加值';
+      });
+    });
 
     var sending=false;
     $('sendLink').addEventListener('click',function(){

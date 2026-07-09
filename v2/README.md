@@ -115,11 +115,40 @@ await sb.from('credit_balances').update({remaining_credits: 999999}).eq('user_id
 
 ---
 
+# 管理員加值介面(取代手動下 SQL)
+
+登入後如果你是管理員,帳號頁會多出「**管理員:為帳號加值**」區塊,直接輸入
+使用者 Email 與分鐘數即可加值,不用再進 SQL Editor。
+
+### A. 建立加值函式(Supabase)
+SQL Editor → 貼上 `v2/schema_phase4.sql` 整份 → **Run**。
+
+### B. 把自己設為管理員(只需一次)
+同樣在 SQL Editor 執行(把 email 換成你的登入信箱):
+```sql
+update public.profiles set role = 'admin', updated_at = now()
+  where id = (select id from auth.users where email = 'hosanna0813@gmail.com');
+```
+
+### C. 使用
+到 `.../v2/` 登入(強制重新整理),帳號頁會出現加值區塊:
+1. 填「使用者 Email」(對方需先登入過至少一次,帳號才存在)。
+2. 填「加值分鐘數」(例如 60)。
+3. (選填)備註,例如「2026-07 儲值 NT$100」,方便日後對帳。
+4. 按「加值」→ 成功會顯示對方目前剩餘分鐘。
+
+### 安全與對帳
+- 加值端點在後端**再次確認呼叫者是管理員**,前端動任何手腳都無效;非管理員看不到也不能加值。
+- 每次加值都寫入 `credit_transactions`(type=add),可到 Supabase 對帳。
+- 有冪等保護:連點或網路重試不會重複加值。
+
+---
+
 ## 接下來的階段(尚未實作)
 
 | 階段 | 內容 |
 | --- | --- |
 | 三 | YouTube 來源;長音檔背景排程 + 切段;音檔任務後自動刪除、24 小時清理 |
-| 四 | 使用紀錄列表;admin 手動加值介面;流水帳查詢;使用者刪除紀錄;GPT 校正 |
-| 五 | 每日免費額度、長度上限、rate limit、冪等鍵、watchdog 退款 |
+| 四(其餘) | 使用紀錄列表;流水帳查詢;使用者刪除紀錄;GPT 校正 |
+| 五 | 每日免費額度、長度上限、rate limit、watchdog 退款 |
 | 六 | payments 多金流介面;每日監控報表;價格後端化 |
