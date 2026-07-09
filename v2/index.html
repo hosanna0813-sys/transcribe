@@ -91,6 +91,15 @@
     font-family:inherit;font-size:.82rem;margin-right:10px;padding:6px 12px;cursor:pointer;
     border:1px solid var(--line);border-radius:var(--radius-s);background:var(--bg);color:var(--ink);
   }
+  .or-sep{text-align:center;color:var(--muted);font-size:.78rem;margin:12px 0 8px;position:relative}
+  .trim2{display:flex;gap:12px;margin-top:8px;flex-wrap:wrap}
+  .trim2 label{display:flex;align-items:center;gap:6px;font-size:.76rem;color:var(--muted);margin:0}
+  .trim2 input{width:96px;padding:7px 9px;font-size:.85rem}
+  #progBox{margin-top:14px}
+  #progBox.hidden{display:none}
+  .bar2{height:8px;background:var(--line);border-radius:99px;overflow:hidden}
+  .bar2 i{display:block;height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .4s}
+  .prog-txt{font-size:.8rem;color:var(--muted);margin-top:7px}
   .result{margin-top:14px}
   .result.hidden{display:none}
   .result-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;font-size:.85rem;font-weight:500}
@@ -163,11 +172,22 @@
         <p class="hint" id="creditLine"></p>
       </section>
       <section>
-        <div class="step-head"><h2>上傳音檔轉錄</h2></div>
-        <label class="field" for="audioFile">選擇音檔或影片檔(10 分鐘內;影片會自動抽取聲音,檔案上限 100 MB)</label>
+        <div class="step-head"><h2>轉錄(上傳檔案或 YouTube)</h2></div>
+        <label class="field" for="audioFile">上傳音檔或影片檔(影片會自動抽取聲音,檔案上限 100 MB)</label>
         <input type="file" id="audioFile">
-        <button class="primary" id="transcribeBtn" disabled>開始轉錄</button>
+        <div class="or-sep">或</div>
+        <label class="field" for="ytUrl">貼上 YouTube 網址</label>
+        <input type="text" id="ytUrl" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
+        <div class="trim2">
+          <label>起點(選填)<input type="text" id="ytStart" placeholder="0:00" autocomplete="off"></label>
+          <label>終點(選填)<input type="text" id="ytEnd" placeholder="到結尾" autocomplete="off"></label>
+        </div>
+        <button class="primary" id="transcribeBtn">開始轉錄</button>
         <div id="transcribeMsg"></div>
+        <div id="progBox" class="hidden">
+          <div class="bar2"><i id="progFill"></i></div>
+          <div class="prog-txt" id="progTxt"></div>
+        </div>
         <div id="resultBox" class="result hidden">
           <div class="result-head">
             <span>轉錄結果</span>
@@ -175,8 +195,8 @@
           </div>
           <textarea id="resultText" readonly></textarea>
         </div>
-        <p class="hint">轉錄費用依音檔長度扣除(1 秒 = 1 credit;60 秒 = 1 分鐘)。
-        目前為初版:僅單一短音檔、尚無 YouTube 與校正功能,後續版本陸續開放。</p>
+        <p class="hint">轉錄費用依音檔長度扣除(1 秒 = 1 credit;60 秒 = 1 分鐘),最長 3 小時。
+        長音檔會自動分段處理,送出後可留在頁面看進度;YouTube 需站長家用電腦開著。</p>
       </section>
       <section id="adminSection" class="hidden">
         <div class="step-head"><h2>管理員:為帳號加值</h2></div>
@@ -253,6 +273,7 @@
         $('userEmail').textContent=session.user.email||'(未知)';
         loadBalance(session.user.id);
         checkAdmin(session.user.id);
+        if(!render._resumed){render._resumed=true;resumeJob();}
       }else{
         hide('accountCard');show('loginCard');hide('adminSection');
       }
@@ -279,48 +300,112 @@
               function(){ $('minNum').textContent='0'; $('creditLine').textContent='無法讀取額度,請稍後重試。'; });
     }
 
-    /* ---------- 上傳音檔轉錄(呼叫 Render 後端 /api/transcribe) ---------- */
+    /* ---------- 轉錄任務:送出 /api/jobs → 輪詢 /api/jobs/{id} ---------- */
     var fileInput=$('audioFile'),transcribeBtn=$('transcribeBtn');
-    fileInput.addEventListener('change',function(){
-      transcribeBtn.disabled=!fileInput.files.length;
-      setMsg($('transcribeMsg'),'');
-    });
-    var busy=false;
+    var busy=false,pollTimer=null;
+
+    /* 解析時間輸入:'90'、'5:30'、'1:05:30'(全形冒號亦可);空回 null */
+    function parseTime(str){
+      str=(str||'').replace(/:/g,':').trim();
+      if(!str)return null;
+      var m=str.match(/^(\d+)(?::([0-5]?\d))?(?::([0-5]?\d))?$/);
+      if(!m)return NaN;
+      var a=+m[1],b=m[2]!==undefined?+m[2]:null,c=m[3]!==undefined?+m[3]:null;
+      return c!==null?a*3600+b*60+c:(b!==null?a*60+b:a);
+    }
+    function token(){return sb.auth.getSession().then(function(r){
+      var t=r.data.session&&r.data.session.access_token;
+      if(!t)throw new Error('登入已過期,請重新登入');return t;});}
+    function setBusy(on){
+      busy=on;transcribeBtn.disabled=on;transcribeBtn.textContent=on?'處理中…':'開始轉錄';
+    }
+    function showProg(pct,txt){
+      show('progBox');$('progFill').style.width=(pct||0)+'%';$('progTxt').textContent=txt||'';
+    }
+
     transcribeBtn.addEventListener('click',function(){
-      if(busy||!fileInput.files.length)return;
+      if(busy)return;
       var f=fileInput.files[0];
-      busy=true;transcribeBtn.disabled=true;transcribeBtn.textContent='轉錄中…';
-      hide('resultBox');
-      setMsg($('transcribeMsg'),'上傳與轉錄中……(若伺服器休眠,喚醒需 30–60 秒,請耐心等候)','ok');
-      sb.auth.getSession().then(function(r){
-        var token=r.data.session&&r.data.session.access_token;
-        if(!token){throw new Error('登入已過期,請重新登入');}
-        var form=new FormData();form.append('file',f,f.name);
-        return fetch(BACKEND_URL+'/api/transcribe',{
-          method:'POST',headers:{'Authorization':'Bearer '+token,'ngrok-skip-browser-warning':'1'},body:form
-        });
+      var url=($('ytUrl').value||'').trim();
+      if(!f&&!url){setMsg($('transcribeMsg'),'請選擇音檔,或貼上 YouTube 網址。','err');return;}
+      var form=new FormData();
+      if(url){
+        if(!/^https?:\/\/(www\.|m\.|music\.)?(youtube\.com\/|youtu\.be\/)/i.test(url)){
+          setMsg($('transcribeMsg'),'這看起來不是 YouTube 網址。','err');return;}
+        var s=parseTime($('ytStart').value),e=parseTime($('ytEnd').value);
+        if(isNaN(s)||isNaN(e)){setMsg($('transcribeMsg'),'起訖時間格式錯誤(用 秒、分:秒 或 時:分:秒)。','err');return;}
+        if(s!=null&&e!=null&&e<=s){setMsg($('transcribeMsg'),'終點必須大於起點。','err');return;}
+        form.append('youtube_url',url);
+        if(s!=null)form.append('start',s);
+        if(e!=null)form.append('end',e);
+      }else{
+        form.append('file',f,f.name);
+      }
+      setBusy(true);hide('resultBox');
+      setMsg($('transcribeMsg'),'');
+      showProg(0,url?'從 YouTube 取得音訊中……(伺服器/家用電腦喚醒可能需 30–60 秒)':'上傳中……');
+      token().then(function(tk){
+        return fetch(BACKEND_URL+'/api/jobs',{method:'POST',
+          headers:{'Authorization':'Bearer '+tk,'ngrok-skip-browser-warning':'1'},body:form});
       }).then(function(res){
         return res.text().then(function(t){
-          var data;try{data=JSON.parse(t);}catch(e){data={};}
+          var d;try{d=JSON.parse(t);}catch(e){d={};}
           if(!res.ok){
-            var msg=data.detail||('伺服器錯誤(HTTP '+res.status+')');
+            var msg=d.detail||('伺服器錯誤(HTTP '+res.status+')');
             if(res.status===401)msg='登入已過期,請重新登入後再試';
             if(res.status===402)msg='剩餘額度不足,請儲值後再試';
+            if(res.status===409)msg='已有一個轉錄任務進行中,請待完成後再試';
             throw new Error(msg);
           }
-          return data;
+          return d;
         });
-      }).then(function(data){
-        setMsg($('transcribeMsg'),'轉錄完成 ✓','ok');
-        $('resultText').value=data.text||'';
-        show('resultBox');
-        if(typeof data.remaining_credits==='number')setCredits(data.remaining_credits);
+      }).then(function(d){
+        try{localStorage.setItem('tw_v2_job',d.job_id);}catch(e){}
+        showProg(3,'轉錄中……');
+        pollJob(d.job_id);
       }).catch(function(err){
         setMsg($('transcribeMsg'),escapeHtml(err&&err.message||String(err)),'err');
-      }).finally(function(){
-        busy=false;transcribeBtn.disabled=!fileInput.files.length;transcribeBtn.textContent='開始轉錄';
+        hide('progBox');setBusy(false);
       });
     });
+
+    function pollJob(jobId){
+      token().then(function(tk){
+        return fetch(BACKEND_URL+'/api/jobs/'+encodeURIComponent(jobId),
+          {headers:{'Authorization':'Bearer '+tk,'ngrok-skip-browser-warning':'1'}});
+      }).then(function(res){
+        return res.text().then(function(t){
+          var d;try{d=JSON.parse(t);}catch(e){d={};}
+          if(!res.ok)throw new Error(d.detail||('查詢進度失敗(HTTP '+res.status+')'));
+          return d;
+        });
+      }).then(function(d){
+        if(d.status==='processing'){
+          var stage=d.stage||'處理中';
+          showProg(d.progress||0,stage+(d.progress?(' '+d.progress+'%'):'……'));
+          pollTimer=setTimeout(function(){pollJob(jobId);},4000);
+        }else if(d.status==='done'){
+          try{localStorage.removeItem('tw_v2_job');}catch(e){}
+          hide('progBox');setBusy(false);
+          setMsg($('transcribeMsg'),'轉錄完成 ✓','ok');
+          $('resultText').value=d.text||'';show('resultBox');
+          if(typeof d.remaining_credits==='number')setCredits(d.remaining_credits);
+        }else{ // failed
+          try{localStorage.removeItem('tw_v2_job');}catch(e){}
+          hide('progBox');setBusy(false);
+          setMsg($('transcribeMsg'),escapeHtml(d.error||'轉錄失敗'),'err');
+        }
+      }).catch(function(err){
+        // 查詢暫時失敗:再試一次,不中斷任務
+        pollTimer=setTimeout(function(){pollJob(jobId);},5000);
+      });
+    }
+
+    /* 頁面載入時若有進行中的任務(localStorage),自動接回輪詢 */
+    function resumeJob(){
+      var jid=null;try{jid=localStorage.getItem('tw_v2_job');}catch(e){}
+      if(jid){setBusy(true);showProg(0,'接回進行中的任務……');pollJob(jid);}
+    }
     $('copyBtn').addEventListener('click',function(){
       var t=$('resultText').value;
       if(navigator.clipboard){navigator.clipboard.writeText(t);}

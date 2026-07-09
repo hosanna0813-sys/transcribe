@@ -740,3 +740,294 @@ def api_transcribe(
                 pass
         _audio_slots.release()
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# =============================================================
+# 計費版 v2 階段三:YouTube 來源 + 長音檔(背景任務 + 進度輪詢)
+#
+# 需額外環境變數 HOME_RELAY_URL(家用中繼 ngrok 網址,供 YouTube 下載;
+# 未設定則 YouTube 來源停用,上傳仍可用)。
+# =============================================================
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+
+MAX_JOB_SEC = 3 * 3600         # 長音檔上限 3 小時
+CHUNK_SEC = 540                # 每段 9 分鐘(16k 單聲道 32k ≈ 2MB,遠小於 Whisper 25MB)
+CHUNK_WORKERS = 3              # 同一任務內分段並行轉錄數
+_v3_jobs: dict = {}            # job_id(=usage_log id) -> 狀態
+_v3_lock = threading.Lock()
+
+
+def _job_set(job_id, **kw):
+    with _v3_lock:
+        j = _v3_jobs.get(job_id)
+        if j is not None:
+            j.update(kw)
+
+
+def _fmt_hms(sec: int) -> str:
+    h, m, s = sec // 3600, (sec % 3600) // 60, sec % 60
+    return f"[{h:02d}:{m:02d}:{s:02d}]"
+
+
+def _relay_fetch_audio(url: str, start, end, dest: str) -> None:
+    """向家用中繼 /audio 取回(已截取、已轉檔的)m4a,住宅 IP 負責下載"""
+    relay = (os.environ.get("HOME_RELAY_URL") or "").rstrip("/")
+    if not relay:
+        raise HTTPException(503, "YouTube 來源尚未啟用(伺服器未設定家用中繼網址)")
+    q = "/audio?url=" + urllib.parse.quote(url, safe="")
+    if start is not None:
+        q += f"&start={start}"
+    if end is not None:
+        q += f"&end={end}"
+    req = urllib.request.Request(relay + q, headers={"ngrok-skip-browser-warning": "1"})
+    try:
+        with urllib.request.urlopen(req, timeout=1800) as r, open(dest, "wb") as f:
+            shutil.copyfileobj(r, f)
+    except urllib.error.HTTPError as e:
+        detail = (e.read() or b"").decode(errors="ignore")[:200]
+        raise HTTPException(502, f"YouTube 下載失敗:{detail}")
+    except Exception as e:
+        raise HTTPException(502, f"YouTube 下載連線失敗(家用電腦是否開著?):{str(e)[:120]}")
+
+
+def _transcode_and_segment(src: str, tmpdir: str) -> list:
+    """轉 16k 單聲道後,依 CHUNK_SEC 切段,回傳依序的段檔清單"""
+    conv = os.path.join(tmpdir, "conv.m4a")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", src,
+         "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", conv],
+        check=True, timeout=1800, capture_output=True,
+    )
+    pat = os.path.join(tmpdir, "seg_%04d.m4a")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", conv,
+         "-f", "segment", "-segment_time", str(CHUNK_SEC), "-c", "copy", pat],
+        check=True, timeout=1800, capture_output=True,
+    )
+    return sorted(glob.glob(os.path.join(tmpdir, "seg_*.m4a")))
+
+
+def _run_job(job_id, uid, src_path, duration, tmpdir, api_key):
+    """背景執行:切段 → 分批轉錄 → 合併 → 結算;失敗退款。結束釋放槽與暫存。"""
+    try:
+        _job_set(job_id, status="processing", stage="轉檔切段中", progress=0)
+        segs = _transcode_and_segment(src_path, tmpdir)
+        n = len(segs)
+        if n == 0:
+            raise RuntimeError("切段失敗,沒有可轉錄的音訊")
+        texts = [None] * n
+        done = [0]
+        prog_lock = threading.Lock()
+
+        def work(i):
+            texts[i] = _whisper_transcribe(segs[i], api_key)
+            with prog_lock:
+                done[0] += 1
+                _job_set(job_id, stage="轉錄中", progress=int(done[0] * 100 / n))
+
+        _job_set(job_id, stage="轉錄中", progress=0)
+        errs = []
+        with ThreadPoolExecutor(max_workers=CHUNK_WORKERS) as ex:
+            futs = [ex.submit(work, i) for i in range(n)]
+            for f in futs:
+                try:
+                    f.result()
+                except Exception as e:
+                    errs.append(e)
+        if errs:
+            raise errs[0]
+
+        parts = []
+        for i, t in enumerate(texts):
+            marker = _fmt_hms(i * CHUNK_SEC)
+            parts.append((marker + " " + (t or "")).strip())
+        full = "\n\n".join(parts).strip()
+
+        cost_usd = round(duration / 60.0 * WHISPER_USD_PER_MIN, 6)
+        settle = _sb_rpc("complete_transcription", {
+            "p_usage_id": job_id, "p_user_id": uid,
+            "p_actual_seconds": int(math.ceil(duration)), "p_cost_usd": cost_usd,
+            "p_result_text": full,
+        })
+        srow = settle[0] if isinstance(settle, list) else settle
+        remaining = (srow or {}).get("remaining")
+        if remaining is None:
+            remaining = _sb_balance(uid)
+        _job_set(job_id, status="done", progress=100, text=full, remaining=remaining)
+    except Exception as e:
+        try:
+            _sb_rpc("fail_transcription", {
+                "p_usage_id": job_id, "p_user_id": uid, "p_reason": "job_error"})
+        except Exception:
+            pass
+        detail = e.detail if isinstance(e, HTTPException) else str(e)
+        _job_set(job_id, status="failed", error=str(detail)[:200])
+    finally:
+        _audio_slots.release()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.post("/api/jobs")
+def api_create_job(
+    request: Request,
+    file: UploadFile | None = File(None),
+    youtube_url: str | None = Form(None),
+    start: float | None = Form(None),
+    end: float | None = Form(None),
+    authorization: str | None = Header(None),
+):
+    api_key, supabase_url, service_key = _paid_env()
+    if not (api_key and supabase_url and service_key):
+        raise HTTPException(503, "付費轉錄尚未啟用(伺服器未設定金鑰)")
+    rate_check("audio", request)
+    uid = _verify_jwt(authorization)
+
+    if not _audio_slots.acquire(blocking=False):
+        raise HTTPException(429, "伺服器忙碌中,請稍候一分鐘再試")
+    tmpdir = tempfile.mkdtemp(prefix="ytpaid-")
+    src = os.path.join(tmpdir, "src")
+    started = False
+    usage_id = None
+    try:
+        if youtube_url:
+            check_url(youtube_url)
+            _relay_fetch_audio(youtube_url, start, end, src)
+            source_type, source_name = "youtube", youtube_url[:200]
+        elif file is not None:
+            size = 0
+            with open(src, "wb") as out:
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_FILE_BYTES:
+                        raise HTTPException(413, "檔案超過 100 MB 上限")
+                    out.write(chunk)
+            if size == 0:
+                raise HTTPException(400, "沒有收到音檔")
+            source_type, source_name = "upload", (file.filename or "")[:200]
+        else:
+            raise HTTPException(400, "請提供音檔或 YouTube 網址")
+
+        duration = _ffprobe_seconds(src)
+        if duration <= 0:
+            raise HTTPException(400, "音檔長度為 0 或無法辨識")
+        if duration > MAX_JOB_SEC:
+            raise HTTPException(400, f"超過 {MAX_JOB_SEC // 3600} 小時上限,請縮短範圍")
+        cost = int(math.ceil(duration))
+
+        res = _sb_rpc("reserve_transcription", {
+            "p_user_id": uid, "p_cost": cost,
+            "p_source_type": source_type, "p_source_name": source_name, "p_duration": cost,
+        })
+        row = res[0] if isinstance(res, list) else res
+        if not row or not row.get("ok"):
+            reason = (row or {}).get("reason")
+            if reason == "insufficient_credits":
+                raise HTTPException(402, "剩餘額度不足,請儲值後再試")
+            if reason == "active_job_exists":
+                raise HTTPException(409, "已有一個轉錄任務進行中,請待完成後再試")
+            raise HTTPException(502, "預扣額度失敗,請稍後再試")
+        usage_id = row["usage_id"]
+
+        with _v3_lock:
+            _v3_jobs[usage_id] = {"status": "processing", "stage": "準備中",
+                                  "progress": 0, "uid": uid}
+        threading.Thread(target=_run_job,
+                         args=(usage_id, uid, src, duration, tmpdir, api_key),
+                         daemon=True).start()
+        started = True                      # 交棒給背景執行緒:槽與暫存由它清理
+        return {"job_id": usage_id, "duration_seconds": int(math.ceil(duration))}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"建立任務失敗:{str(e)[:200]}")
+    finally:
+        if not started:
+            if usage_id is not None:
+                try:
+                    _sb_rpc("fail_transcription", {
+                        "p_usage_id": usage_id, "p_user_id": uid, "p_reason": "start_failed"})
+                except Exception:
+                    pass
+            _audio_slots.release()
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.get("/api/jobs/{job_id}")
+def api_job_status(job_id: str, authorization: str | None = Header(None)):
+    _, supabase_url, service_key = _paid_env()
+    if not (supabase_url and service_key):
+        raise HTTPException(503, "服務尚未設定")
+    uid = _verify_jwt(authorization)
+
+    with _v3_lock:
+        j = _v3_jobs.get(job_id)
+        j = dict(j) if j else None
+
+    if j is not None:
+        if j.get("uid") != uid:
+            raise HTTPException(403, "沒有權限")
+        st = j.get("status")
+        if st == "done":
+            with _v3_lock:
+                _v3_jobs.pop(job_id, None)
+            try:                            # 清掉 DB 暫存逐字稿(去內容化)
+                _sb_rpc("claim_result", {"p_usage_id": job_id, "p_user_id": uid})
+            except Exception:
+                pass
+            rem = j.get("remaining") or 0
+            return {"status": "done", "progress": 100, "text": j.get("text", ""),
+                    "remaining_credits": rem, "remaining_minutes": int(rem) // 60}
+        if st == "failed":
+            with _v3_lock:
+                _v3_jobs.pop(job_id, None)
+            return {"status": "failed", "error": j.get("error", "轉錄失敗")}
+        return {"status": "processing", "stage": j.get("stage", ""), "progress": j.get("progress", 0)}
+
+    # 不在記憶體:可能已被別的輪詢取走,或伺服器重啟造成孤兒任務
+    res = _sb_rpc("claim_result", {"p_usage_id": job_id, "p_user_id": uid})
+    row = (res[0] if res else None) if isinstance(res, list) else res
+    if not row:
+        raise HTTPException(404, "找不到這個任務")
+    status = row.get("status")
+    if status == "completed":
+        text = row.get("result_text")
+        if text is not None:
+            bal = _sb_balance(uid)
+            return {"status": "done", "progress": 100, "text": text,
+                    "remaining_credits": bal, "remaining_minutes": bal // 60}
+        return {"status": "done", "progress": 100, "text": "",
+                "note": "結果已取走"}
+    if status in ("reserved", "processing"):
+        try:
+            _sb_rpc("fail_transcription", {
+                "p_usage_id": job_id, "p_user_id": uid, "p_reason": "server_restart"})
+        except Exception:
+            pass
+        return {"status": "failed", "error": "伺服器重新啟動,任務中斷,已退款,請重試"}
+    return {"status": "failed", "error": "任務已結束(失敗或已退款)"}
+
+
+def _cleanup_loop():
+    """每小時清掉逾 24 小時的暫存目錄(零保存兜底)"""
+    while True:
+        time.sleep(3600)
+        try:
+            now = time.time()
+            root = tempfile.gettempdir()
+            for name in os.listdir(root):
+                if name.startswith(("ytpaid-", "ytaudio-", "ytcap-")):
+                    p = os.path.join(root, name)
+                    try:
+                        if now - os.path.getmtime(p) > 24 * 3600:
+                            shutil.rmtree(p, ignore_errors=True)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+
+threading.Thread(target=_cleanup_loop, daemon=True).start()
