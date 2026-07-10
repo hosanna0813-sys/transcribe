@@ -274,6 +274,18 @@ SQL Editor → 貼上 `v2/schema_phase5.sql` 整份 → **Run**。
 
 三個頁面互相有連結,不影響彼此。
 
+### 正式網址:根網域(AdSense 驗證需要)
+AdSense 只驗證**網域根目錄**,所以另外建立了使用者頁 repo **`hosanna0813-sys.github.io`**,
+正式網址為 <https://hosanna0813-sys.github.io/>(首頁 / `v2/` / `byok/` / `privacy/` / `ads.txt`)。
+- **本 repo(transcribe)仍是前端的唯一原始碼**:新 repo 裡只有一個
+  `.github/workflows/sync.yml`,每 3 小時(以及可在該 repo 的 Actions 頁手動 Run workflow)
+  自動從本 repo 複製 `index.html`、`v2/`、`byok/`、`privacy/`、`ads.txt` 過去。
+  **改前端一律改本 repo**,新網址會自動跟上。
+- 舊網址 `…/transcribe/…` 照常可用(頁面已加 `<link rel="canonical">` 指向新網址,
+  告訴 Google 正式版在根網域)。
+- (選用)Render 的 `SITE_V2_URL` 可改成 `https://hosanna0813-sys.github.io/v2/`,
+  讓綠界付款導回直接到新網址、少一次跳轉。
+
 ### A. 免費試用的用量與防濫用(Render 環境變數)
 試用花的是**你的** OpenAI 金鑰,所以用兩層每日上限保護荷包。到 Render → **Environment** 新增:
 | 變數名 | 值 |
