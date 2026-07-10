@@ -380,12 +380,18 @@ window.ADS = {
   function $(id){return document.getElementById(id);}
   function show(el){(typeof el==='string'?$(el):el).classList.remove('hidden');}
   function hide(el){(typeof el==='string'?$(el):el).classList.add('hidden');}
+  var persistMsg=null;   // 持久狀態訊息(如「試用未開放」),清空一般訊息時還原顯示
   function setMsg(text,kind){
     var m=$('msg');
-    if(!text){m.className='msg';m.textContent='';return;}
+    if(!text){
+      if(persistMsg){m.className='msg show '+persistMsg.kind;m.innerHTML=persistMsg.html;}
+      else{m.className='msg';m.textContent='';}
+      return;
+    }
     m.className='msg show '+(kind||'info');m.innerHTML=text;
   }
-  function escapeHtml(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function setPersistMsg(html,kind){persistMsg={html:html,kind:kind};setMsg('');}
+  function escapeHtml(s){return String(s).replace(/[&<>"']/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 
   /* 深色模式 */
   var modeBtn=$('modeBtn');
@@ -419,7 +425,8 @@ window.ADS = {
   ['dragleave','drop'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove('over');});});
   drop.addEventListener('drop',function(e){if(e.dataTransfer.files.length){fileInput.files=e.dataTransfer.files;onFile();}});
   fileInput.addEventListener('change',onFile);
-  var fileBlocked=false;   // 預檢不過就擋送出
+  var fileBlocked=false;      // 預檢不過就擋送出
+  var precheckPending=false;  // 預檢進行中,擋住搶快送出
   function setPre(text,kind){
     var p=$('precheck');
     if(!text){p.className='precheck';p.textContent='';return;}
@@ -427,7 +434,7 @@ window.ADS = {
   }
   function onFile(){
     var f=fileInput.files[0];
-    fileBlocked=false;setPre('');
+    fileBlocked=false;precheckPending=false;setPre('');
     if(!f){hide('fileName');return;}
     $('fileName').textContent='已選擇:'+f.name;show('fileName');
     if(f.size>100*1024*1024){
@@ -436,11 +443,12 @@ window.ADS = {
       return;
     }
     /* 用瀏覽器讀時長,超過試用上限立即提示,免得整檔上傳完才被拒 */
+    precheckPending=true;
     var url=URL.createObjectURL(f);
     var au=document.createElement('audio');
     au.preload='metadata';
     au.onloadedmetadata=function(){
-      URL.revokeObjectURL(url);
+      URL.revokeObjectURL(url);precheckPending=false;
       var dur=au.duration;
       if(isFinite(dur)&&dur>0){
         if(dur>trialMin*60+1){
@@ -452,7 +460,7 @@ window.ADS = {
       }
       /* 讀不到時長就放行,後端仍會檢查 */
     };
-    au.onerror=function(){URL.revokeObjectURL(url);};
+    au.onerror=function(){URL.revokeObjectURL(url);precheckPending=false;};
     au.src=url;
   }
 
@@ -471,6 +479,7 @@ window.ADS = {
   function ytApiReady(cb){
     /* 一律非同步呼叫 cb(即使已 ready),確保 DOM 已掛回文件 */
     if(_ytApiState==='ready'){setTimeout(cb,0);return;}
+    if(_ytApiState==='failed'){setTimeout(function(){cb(new Error('yt-api'));},0);return;}
     _ytApiWaiters.push(cb);
     if(_ytApiState==='loading')return;
     _ytApiState='loading';
@@ -481,7 +490,17 @@ window.ADS = {
     };
     var s=document.createElement('script');
     s.src='https://www.youtube.com/iframe_api';
+    s.onerror=function(){   // youtube.com 被擋/斷網:通知等待者,別讓「載入中」卡死
+      _ytApiState='failed';
+      _ytApiWaiters.forEach(function(fn){fn(new Error('yt-api'));});
+      _ytApiWaiters=[];
+    };
     document.head.appendChild(s);
+  }
+  function ytPreviewFail(){
+    var l=$('ytLoading');
+    if(l){l.textContent='無法載入預覽(YouTube 連不上或影片無法播放),請直接手動輸入起訖時間。';}
+    $('markStart').disabled=true;$('markEnd').disabled=true;
   }
   var lastId=null,ytPlayer=null;
   function destroyPlayer(){
@@ -498,15 +517,19 @@ window.ADS = {
     show('ytPreview');
     var mount=document.createElement('div');mount.id='ytpv-mount';
     frame.appendChild(mount);
-    ytApiReady(function(){
+    ytApiReady(function(err){
       if(!frame.isConnected||lastId!==id)return;
+      if(err){ytPreviewFail();return;}
       ytPlayer=new YT.Player('ytpv-mount',{
         videoId:id,
         playerVars:{rel:0},
-        events:{onReady:function(){
-          var l=$('ytLoading');if(l)l.style.display='none';
-          $('markStart').disabled=false;$('markEnd').disabled=false;
-        }}
+        events:{
+          onReady:function(){
+            var l=$('ytLoading');if(l)l.style.display='none';
+            $('markStart').disabled=false;$('markEnd').disabled=false;
+          },
+          onError:function(){ytPreviewFail();}   // 私人/已刪/不允許嵌入
+        }
       });
     });
   });
@@ -519,7 +542,7 @@ window.ADS = {
   $('markEnd').addEventListener('click',function(){markTime('end');});
 
   function parseTime(str){
-    str=(str||'').trim();
+    str=(str||'').replace(/:/g,':').trim();   // 支援全形冒號
     if(!str)return null;
     var m=str.match(/^(\d+)(?::([0-5]?\d))?(?::([0-5]?\d))?$/);
     if(!m)return NaN;
@@ -537,7 +560,7 @@ window.ADS = {
         Array.prototype.forEach.call(document.querySelectorAll('.minTxt'),function(e){e.textContent=d.trial_minutes;});
       }
       if(!d.enabled){
-        setMsg('免費試用暫時未開放,請稍後再試,或<a href="v2/" style="color:inherit;text-decoration:underline">登入使用</a>。','err');
+        setPersistMsg('免費試用暫時未開放,請稍後再試,或<a href="v2/" style="color:inherit;text-decoration:underline">登入使用</a>。','err');
         $('goBtn').disabled=true;
       }else if(typeof d.remaining_minutes==='number'){
         showRemain(d.remaining_minutes);
@@ -560,13 +583,14 @@ window.ADS = {
   syncOptDeps();
 
   /* 階段進度(單一請求,以經過時間推進;完成即滿格) */
-  var progTimer=null,progStartAt=0;
+  var progTimer=null,progStartAt=0,progHideTimer=null,retryNoteUntil=0;
   var STAGES=[[0,5,'喚醒伺服器中…(閒置後第一次約需 30–60 秒)'],
               [15,30,'取得音訊中…'],
               [40,55,'AI 轉錄中…'],
               [75,80,'AI 校正中…']];
   function progBegin(){
-    progStartAt=Date.now();
+    if(progHideTimer){clearTimeout(progHideTimer);progHideTimer=null;}  // 別讓上一輪的隱藏 timer 誤殺這輪
+    progStartAt=Date.now();retryNoteUntil=0;
     $('prog').classList.add('show');
     progTick();
     progTimer=setInterval(progTick,3000);
@@ -578,13 +602,13 @@ window.ADS = {
     }
     pct=Math.min(pct+el/8,92);   // 緩慢爬升,最多 92%,完成才滿格
     $('progFill').style.width=pct+'%';
-    $('progTxt').textContent=txt;
+    if(Date.now()>=retryNoteUntil)$('progTxt').textContent=txt;  // 重試提示顯示期間不覆寫
   }
   function progEnd(){
     if(progTimer){clearInterval(progTimer);progTimer=null;}
     $('progFill').style.width='100%';
     var p=$('prog');
-    setTimeout(function(){p.classList.remove('show');$('progFill').style.width='0';},600);
+    progHideTimer=setTimeout(function(){p.classList.remove('show');$('progFill').style.width='0';progHideTimer=null;},600);
   }
 
   /* 送出:網路例外與 503/504(伺服器喚醒中)自動退避重試;
@@ -608,6 +632,7 @@ window.ADS = {
   }
   function retryLater(form,attempt,note){
     $('progTxt').textContent=note+'(第 '+(attempt+1)+' 次)';
+    retryNoteUntil=Date.now()+(attempt+1)*2000+4000;   // 提示至少顯示到重試送出後
     return new Promise(function(ok){setTimeout(ok,(attempt+1)*2000);})
       .then(function(){return sendTrial(form,attempt+1);});
   }
@@ -644,6 +669,7 @@ window.ADS = {
     }else{
       var f=fileInput.files[0];
       if(!f){setMsg('請選擇要轉錄的音檔。','err');return;}
+      if(precheckPending){setMsg('正在檢查檔案長度,請稍候一秒再按。','info');return;}
       if(fileBlocked){setMsg('這個檔案超過免費試用限制,請見上方提示。','err');return;}
       form.append('file',f,f.name);
     }
@@ -653,7 +679,7 @@ window.ADS = {
     form.append('remove_fillers',$('optFillers').checked?'true':'false');
     form.append('speakers',$('optSpeakers').checked?'true':'false');
 
-    setBusy(true);hide('resultCard');setMsg('');
+    setBusy(true);setMsg('');   // 不隱藏上一次結果:若這次失敗,舊結果仍可用
     var t0=Date.now();
     progBegin();
     sendTrial(form,0)
@@ -690,8 +716,9 @@ window.ADS = {
   function verName(){return (result.hasFixed&&curTab==='fixed')?'校正版':'原始版';}
   function downloadBlob(blob,name){
     var a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);a.download=name;
-    a.click();URL.revokeObjectURL(a.href);
+    var u=URL.createObjectURL(blob);
+    a.href=u;a.download=name;a.click();
+    setTimeout(function(){URL.revokeObjectURL(u);},1000);   // 延遲釋放,避免下載被中斷
   }
   $('copyBtn').addEventListener('click',function(){
     var ta=$('resultText'),self=this;
