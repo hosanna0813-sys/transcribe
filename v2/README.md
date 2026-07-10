@@ -228,6 +228,24 @@ SQL Editor → 貼上 `v2/schema_phase6.sql` 整份 → **Run**(可重複執行)
 
 套用後無需改前端;後端偵測到 Supabase 就自動改用資料庫試用計量。
 
+---
+
+# 階段七:成本統計(選用,建議套用以利對帳)
+
+SQL Editor → 貼上 `v2/schema_phase7.sql` 整份 → **Run**(可重複)。這份會:
+- 擴充 `complete_transcription`,把每筆付費任務的 **GPT 校正 tokens** 與**費率快照**
+  寫進 `usage_logs`(`prompt_tokens`/`completion_tokens`/`estimated_openai_cost_usd`/
+  `applied_pricing`);Whisper 成本依實際秒數計。
+- 新增 `job_cost_summary` 對帳檢視(每筆任務的成本與收費)。
+
+**價格設定(集中於後端,環境變數可覆蓋)**:預設 Whisper US$0.006/分、gpt-4o-mini
+輸入 US$0.15/百萬 tokens、輸出 US$0.60/百萬。要調整,在 Render 設(例):
+`PRICE_WHISPER_PER_MIN`、`PRICE_GPT_4O_MINI_IN_PER_1M`、`PRICE_GPT_4O_MINI_OUT_PER_1M`。
+> 沒拿到 GPT usage 時,成本明細會標記 `tokens_known=false`(即該筆校正成本為估算)。
+
+> 後端程式已把價格(`pricing.py`)、金流簽章(`ecpay.py`)、中繼驗證(`relay.py`)
+> 拆成獨立模組;Dockerfile 已一併複製,無需額外設定。
+
 # 金流:綠界 ECPay 線上儲值
 
 使用者可在帳號頁的「儲值」區塊選方案 → 線上刷卡 / LINE Pay 付款 → 額度自動入帳。

@@ -14,7 +14,6 @@ import ipaddress
 import os
 import re
 import glob
-import secrets
 import shutil
 import subprocess
 import tempfile
@@ -131,64 +130,11 @@ def check_url(url: str) -> None:
 # =============================================================
 APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
 IS_PRODUCTION = APP_ENV == "production"
-RELAY_SIG_SKEW_SEC = 60
-_relay_nonces: dict = {}          # nonce -> expiry_ts
-_relay_nonce_lock = threading.Lock()
 
-
-def _relay_secret() -> str:
-    return os.environ.get("RELAY_SHARED_SECRET", "")
-
-
-def _relay_auth_required() -> bool:
-    return os.environ.get("RELAY_REQUIRE_AUTH", "").strip() in ("1", "true", "yes")
-
-
-def _relay_sign(secret: str, ts: str, nonce: str, method: str, path: str, query: dict) -> str:
-    cq = "&".join(f"{k}={query[k]}" for k in sorted(query))
-    msg = f"{ts}\n{nonce}\n{method.upper()}\n{path}\n{cq}"
-    return hmac.new(secret.encode(), msg.encode(), "sha256").hexdigest()
-
-
-def _relay_sign_headers(method: str, path: str, query: dict) -> dict:
-    """對外呼叫家用中繼時附上簽章(未設密鑰則不附,由中繼端決定是否拒絕)"""
-    secret = _relay_secret()
-    if not secret:
-        return {}
-    ts = str(int(time.time()))
-    nonce = secrets.token_hex(16)
-    return {"X-Relay-Timestamp": ts, "X-Relay-Nonce": nonce,
-            "X-Relay-Signature": _relay_sign(secret, ts, nonce, method, path, query)}
-
-
-def relay_guard(request: Request) -> None:
-    """RELAY_REQUIRE_AUTH=1 時強制驗證簽章;失敗一律 403、不洩漏細節"""
-    if not _relay_auth_required():
-        return
-    secret = _relay_secret()
-    if not secret:
-        raise HTTPException(403, "服務未開放")   # fail closed:要求驗證但沒設密鑰
-    ts = request.headers.get("x-relay-timestamp", "")
-    nonce = request.headers.get("x-relay-nonce", "")
-    sig = request.headers.get("x-relay-signature", "")
-    if not (ts and nonce and sig):
-        raise HTTPException(403, "服務未開放")
-    try:
-        if abs(time.time() - int(ts)) > RELAY_SIG_SKEW_SEC:
-            raise ValueError
-    except ValueError:
-        raise HTTPException(403, "服務未開放")
-    query = {k: v for k, v in request.query_params.items()}
-    expect = _relay_sign(secret, ts, nonce, request.method, request.url.path, query)
-    if not hmac.compare_digest(expect, sig):
-        raise HTTPException(403, "服務未開放")
-    now = time.time()
-    with _relay_nonce_lock:
-        for k in [k for k, exp in _relay_nonces.items() if exp < now]:
-            del _relay_nonces[k]
-        if nonce in _relay_nonces:
-            raise HTTPException(403, "服務未開放")   # nonce 重放
-        _relay_nonces[nonce] = now + RELAY_SIG_SKEW_SEC * 2
+# 家用中繼 HMAC 驗證已抽到 relay.py;以舊名沿用(路由於下方呼叫)
+from relay import (RELAY_SIG_SKEW_SEC, _relay_nonces, _relay_nonce_lock,
+                   _relay_secret, _relay_auth_required, _relay_sign,
+                   _relay_sign_headers, relay_guard)
 
 
 # YouTube 對機房 IP 常要求登入驗證。兩層突破:
@@ -558,7 +504,17 @@ from fastapi import File, Form, Header, UploadFile
 from pydantic import BaseModel
 
 MAX_CLIP_UPLOAD_SEC = 10 * 60          # 階段二短音檔上限 10 分鐘
-WHISPER_USD_PER_MIN = 0.006            # Whisper 定價(供成本估算/監控)
+import pricing                          # 集中式價格設定與成本估算
+WHISPER_USD_PER_MIN = pricing.whisper_per_min()   # 相容舊名(仍供顯示)
+
+
+def _settle_cost(duration_sec: float, correct_usage: dict | None):
+    """依實際用量算整筆成本明細:whisper(秒)+ 校正(tokens)。
+    correct_usage=None 代表未做校正;有做但沒拿到 usage 則 tokens_known=False。"""
+    pt = int((correct_usage or {}).get("prompt_tokens", 0) or 0)
+    ct = int((correct_usage or {}).get("completion_tokens", 0) or 0)
+    tokens_known = bool(correct_usage) and (correct_usage.get("calls", 0) > 0)
+    return pricing.estimate_job_cost(duration_sec, CORRECTION_MODEL, pt, ct, tokens_known), pt, ct
 ALLOWED_JWT_ALGORITHMS = ("ES256",)   # Supabase 簽發演算法,白名單固定
 _jwks_cache: dict = {"keys": None, "at": 0.0}
 _jwks_lock = threading.Lock()
@@ -818,8 +774,10 @@ def _chunk_text(text: str, max_len: int = 6000) -> list:
     return chunks
 
 
-def _gpt_correct(text: str, api_key: str, remove_fillers: bool = False, speakers: bool = False) -> str:
-    """用 GPT 逐塊校正逐字稿(修錯字/標點,不改內容);失敗由呼叫端決定退回原文"""
+def _gpt_correct(text: str, api_key: str, remove_fillers: bool = False, speakers: bool = False,
+                 usage: dict | None = None) -> str:
+    """用 GPT 逐塊校正逐字稿(修錯字/標點,不改內容);失敗由呼叫端決定退回原文。
+    傳入 usage dict 時,累計 prompt_tokens/completion_tokens(供成本統計)。"""
     import httpx
     out = []
     sys_prompt = _correct_sys(remove_fillers, speakers)
@@ -834,7 +792,13 @@ def _gpt_correct(text: str, api_key: str, remove_fillers: bool = False, speakers
         )
         if resp.status_code != 200:
             raise RuntimeError(f"校正失敗:{resp.text[:150]}")
-        out.append((resp.json()["choices"][0]["message"]["content"] or "").strip())
+        body = resp.json()
+        out.append((body["choices"][0]["message"]["content"] or "").strip())
+        if usage is not None:
+            u = body.get("usage") or {}
+            usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + int(u.get("prompt_tokens", 0) or 0)
+            usage["completion_tokens"] = usage.get("completion_tokens", 0) + int(u.get("completion_tokens", 0) or 0)
+            usage["calls"] = usage.get("calls", 0) + 1
     return "\n\n".join(out).strip()
 
 
@@ -983,11 +947,12 @@ def api_transcribe(
 
         text = _whisper_transcribe(m4a, api_key)
 
-        # 5) 結算(實際秒數;Whisper 成本估算供監控)
-        cost_usd = round(duration / 60.0 * WHISPER_USD_PER_MIN, 6)
+        # 5) 結算(實際秒數;此端點不做校正,成本=Whisper)
+        cost, pt, ct = _settle_cost(duration, None)
         settle = _sb_rpc("complete_transcription", {
             "p_usage_id": usage_id, "p_user_id": uid,
-            "p_actual_seconds": int(math.ceil(duration)), "p_cost_usd": cost_usd,
+            "p_actual_seconds": int(math.ceil(duration)), "p_cost_usd": cost["total_usd"],
+            "p_prompt_tokens": pt, "p_completion_tokens": ct, "p_pricing": cost,
         })
         srow = settle[0] if isinstance(settle, list) else settle
         remaining = (srow or {}).get("remaining")
@@ -1169,18 +1134,21 @@ def _run_job(job_id, uid, src_path, duration, tmpdir, api_key, do_correct=False)
         full = "\n\n".join(parts).strip()
 
         # 可選:GPT 校正(修錯字/標點);校正失敗就退回未校正原文,不讓整筆失敗
+        cu = None
         if do_correct and full:
             _job_set(job_id, stage="校正中", progress=100)
+            cu = {}
             try:
-                full = _gpt_correct(full, api_key)
+                full = _gpt_correct(full, api_key, usage=cu)
             except Exception:
-                pass
+                cu = None   # 校正失敗 → 不計校正成本
 
-        cost_usd = round(duration / 60.0 * WHISPER_USD_PER_MIN, 6)
+        cost, pt, ct = _settle_cost(duration, cu)
         settle = _sb_rpc("complete_transcription", {
             "p_usage_id": job_id, "p_user_id": uid,
-            "p_actual_seconds": int(math.ceil(duration)), "p_cost_usd": cost_usd,
+            "p_actual_seconds": int(math.ceil(duration)), "p_cost_usd": cost["total_usd"],
             "p_result_text": full,
+            "p_prompt_tokens": pt, "p_completion_tokens": ct, "p_pricing": cost,
         })
         srow = settle[0] if isinstance(settle, list) else settle
         remaining = (srow or {}).get("remaining")
@@ -1426,48 +1394,10 @@ threading.Thread(target=_watchdog_loop, daemon=True).start()
 #   PUBLIC_BASE_URL(本後端公開網址,組 ReturnURL)
 #   SITE_V2_URL(前端 v2 網址,付款後導回)
 # =============================================================
-import hashlib
 import random
 
-# 綠界公開測試帳號(官方文件提供,任何人可用於測試環境)
-_ECPAY_TEST = {"mid": "2000132", "key": "5294y06JbISpM5x9", "iv": "v77hoKGq4kWxNNIS"}
-_ECPAY_AIO = {
-    "stage": "https://payment-stage.ecpay.com.tw/Cashier/AioCheckOut/V5",
-    "production": "https://payment.ecpay.com.tw/Cashier/AioCheckOut/V5",
-}
-
-# 儲值方案(價格由營運者自行調整;1 分鐘 = 60 credits)
-PAY_PACKAGES = [
-    {"id": "p100", "amount_twd": 100, "minutes": 60},
-    {"id": "p300", "amount_twd": 300, "minutes": 200},
-    {"id": "p500", "amount_twd": 500, "minutes": 360},
-]
-
-
-def _ecpay_conf():
-    mid = os.environ.get("ECPAY_MERCHANT_ID", "")
-    key = os.environ.get("ECPAY_HASH_KEY", "")
-    iv = os.environ.get("ECPAY_HASH_IV", "")
-    env = os.environ.get("ECPAY_ENV", "stage")
-    if not (mid and key and iv):
-        if IS_PRODUCTION:
-            # 正式環境缺正式金鑰:金流 fail closed,絕不退回公開測試金鑰
-            raise HTTPException(503, "金流尚未設定完成,暫停儲值")
-        mid, key, iv = _ECPAY_TEST["mid"], _ECPAY_TEST["key"], _ECPAY_TEST["iv"]
-    return mid, key, iv, ("production" if env == "production" else "stage")
-
-
-def _ecpay_checkmac(params: dict) -> str:
-    """依綠界規格計算 CheckMacValue(EncryptType=1,SHA256)"""
-    _, key, iv, _ = _ecpay_conf()
-    items = sorted(((k, v) for k, v in params.items() if k != "CheckMacValue"),
-                   key=lambda x: x[0].lower())
-    raw = "HashKey=" + key + "&" + "&".join(f"{k}={v}" for k, v in items) + "&HashIV=" + iv
-    enc = urllib.parse.quote_plus(raw).lower()
-    for a, b in [("%2d", "-"), ("%5f", "_"), ("%2e", "."), ("%21", "!"),
-                 ("%2a", "*"), ("%28", "("), ("%29", ")"), ("%20", "+")]:
-        enc = enc.replace(a, b)
-    return hashlib.sha256(enc.encode()).hexdigest().upper()
+# 金流純運算/設定已抽到 ecpay.py;此處以舊名沿用(路由與入帳邏輯仍在下方)
+from ecpay import PAY_PACKAGES, AIO_URLS as _ECPAY_AIO, ecpay_conf as _ecpay_conf, ecpay_checkmac as _ecpay_checkmac
 
 
 def _sb_insert_payment(user_id, amount, credits, mtn):
