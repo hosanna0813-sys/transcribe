@@ -1089,6 +1089,35 @@ def _relay_fetch_audio(url: str, start, end, dest: str) -> None:
         raise HTTPException(502, f"YouTube 下載連線失敗(家用電腦是否開著?):{str(e)[:120]}")
 
 
+def _relay_info(url: str) -> dict:
+    """向家用中繼 /info 取影片資訊(住宅 IP,避開機房被 YouTube 擋);回 JSON(含 duration)。
+    絕不在 Render 端 probe YouTube —— 那會被機器人驗證擋下。"""
+    relay = (os.environ.get("HOME_RELAY_URL") or "").rstrip("/")
+    if not relay:
+        raise HTTPException(503, "YouTube 來源尚未啟用(伺服器未設定家用中繼網址)")
+    query = {"url": url}
+    q = "/info?url=" + urllib.parse.quote(url, safe="")
+    headers = {"ngrok-skip-browser-warning": "1"}
+    headers.update(_relay_sign_headers("GET", "/info", query))
+    req = urllib.request.Request(relay + q, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        body = (e.read() or b"").decode(errors="ignore")
+        try:
+            detail = json.loads(body).get("detail") or body
+        except Exception:
+            detail = body
+        # 原樣傳遞中繼的語意狀態(400 影片問題 / 502 bot / 503 未啟用),其餘視為 502
+        code = e.code if e.code in (400, 502, 503) else 502
+        raise HTTPException(code, str(detail)[:200] or "YouTube 讀取失敗")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"YouTube 資訊讀取連線失敗(家用電腦是否開著?):{str(e)[:120]}")
+
+
 def _transcode_and_segment(src: str, tmpdir: str) -> list:
     """轉 16k 單聲道後,依 CHUNK_SEC 切段,回傳依序的段檔清單"""
     conv = os.path.join(tmpdir, "conv.m4a")
@@ -1293,8 +1322,8 @@ def api_create_job(
             check_url(youtube_url)
             if start is not None and end is not None and end <= start:
                 raise HTTPException(400, "終點必須大於起點")
-            meta = probe(youtube_url)
-            _reject_live(meta)
+            # 取長度走家用中繼(住宅 IP);中繼端已擋直播/太長。不在 Render probe(會被 YouTube 擋)
+            meta = _relay_info(youtube_url)
             vdur = int(meta.get("duration") or 0)
             s = int(start) if start else 0
             if start is None and end is None:
