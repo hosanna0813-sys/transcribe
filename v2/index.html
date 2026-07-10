@@ -618,16 +618,34 @@
 
     $('logoutBtn').addEventListener('click',function(){sb.auth.signOut();});
 
-    /* 綠界付款導回:顯示提示,並過幾秒刷新餘額(真正入帳由後端 callback 處理,可能有幾秒延遲) */
+    /* 綠界付款導回:入帳由後端 callback 處理,Render 免費方案休眠時可能延遲 30~90 秒,
+       故輪詢到約 2 分鐘、偵測餘額增加就停,避免使用者誤以為失敗 */
     if(/[?&]paid=1/.test(window.location.search)){
-      setTimeout(function(){
-        if($('payMsg'))setMsg($('payMsg'),'付款完成,額度處理中……若餘額未更新,稍候重新整理即可。','ok');
-      },300);
-      var tries=0,iv=setInterval(function(){
-        tries++;sb.auth.getUser().then(function(u){if(u.data.user)loadBalance(u.data.user.id);});
-        if(tries>=5)clearInterval(iv);
-      },3000);
       try{history.replaceState(null,'',window.location.pathname);}catch(e){}
+      var payBase=null,payTries=0,payMax=30;   // 每 4 秒一次 × 30 ≈ 2 分鐘
+      function payMsg(){ if($('payMsg'))setMsg($('payMsg'),
+        '付款處理中,伺服器喚醒中,最多需 1~2 分鐘,請稍候…','ok'); }
+      setTimeout(payMsg,300);
+      var payIv=setInterval(function(){
+        payTries++;
+        sb.auth.getUser().then(function(u){
+          var uid=u.data.user&&u.data.user.id; if(!uid)return;
+          return sb.from('credit_balances').select('remaining_credits').eq('user_id',uid).maybeSingle()
+            .then(function(res){
+              var c=(res.data&&res.data.remaining_credits)||0;
+              if(payBase===null){payBase=c;setCredits(c);return;}  // 第一次記基準
+              if(c>payBase){                                       // 入帳成功
+                setCredits(c);clearInterval(payIv);
+                if($('payMsg'))setMsg($('payMsg'),'已入帳 ✓ 額度已更新','ok');
+              }
+            });
+        });
+        if(payTries>=payMax){
+          clearInterval(payIv);
+          if($('payMsg'))setMsg($('payMsg'),
+            '若餘額仍未更新,請稍後重新整理;款項已收到會自動入帳,不會遺失。','ok');
+        }
+      },4000);
     }
 
     show('loadingCard');
