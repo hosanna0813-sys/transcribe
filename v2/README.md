@@ -285,15 +285,40 @@ SQL Editor → 貼上 `v2/schema_phase5.sql` 整份 → **Run**。
 - 單檔/單段上限就是 `TRIAL_MINUTES` 分鐘;超過會請訪客截取較短片段或登入使用。
 - 另有既有的每小時請求數上限一起把關。
 
-### B. 放 AdSense 廣告(先預留、之後再啟用)
-首頁已預留**兩個廣告版位**(內容上方與結果下方),目前顯示「廣告版位 · 待啟用」佔位框,
-不影響任何功能。等你申請好 Google AdSense 後:
-1. 到 <https://adsense.google.com> 申請帳號、通過審核,拿到發布商 ID(形如 `ca-pub-1234567890123456`)。
-2. 在 AdSense 後台為這兩個位置各建立一個「多媒體廣告單元」,取得各自的 `data-ad-slot` 版位代碼。
-3. 編輯根目錄 `index.html`:
-   - 把 `<head>` 裡被註解的 `adsbygoogle.js` script 取消註解,並把 `ca-pub-XXXXXXXXXXXXXXXX` 換成你的發布商 ID。
-   - 把兩個 `<div class="ad-slot">…</div>` 內的佔位文字換成 AdSense 給你的 `<ins class="adsbygoogle" …>` 廣告碼(HTML 內已附範例,連 `data-ad-client`/`data-ad-slot` 要換的地方都標好了)。
-4. 存檔、推上 GitHub Pages 即生效。審核期間可先留佔位,不影響網站運作。
+### B. 放 AdSense 廣告
+首頁已預留**兩個廣告版位**(內容上方、結果下方),目前是「廣告版位 · 待啟用」佔位框,
+不影響任何功能。整個啟用**只要在一個地方填字**——根目錄 `index.html` 的 `<head>` 裡有:
+```html
+<script>
+window.ADS = {
+  pub: '',        // ← 填你的發布商 ID,例:'ca-pub-1234567890123456'
+  slotTop: '',    // ← 核准後填(內容上方版位代碼)
+  slotBottom: ''  // ← 核准後填(結果下方版位代碼)
+};
+</script>
+```
 
-> 提醒:AdSense 通常要求網站有隱私權政策並取得使用者同意(尤其歐盟訪客)。上線收廣告前,
-> 建議在頁尾補一頁隱私權說明。
+**步驟**
+1. **申請並送審**:到 <https://adsense.google.com> 用你的網站申請。拿到發布商 ID
+   (形如 `ca-pub-1234567890123456`)後,把它填進上面的 `pub`,存檔推上線。
+   這樣廣告程式就會自動載入,Google 也能驗證網站擁有權、開始審核(通常數天)。
+   - 審核期間 `slotTop`/`slotBottom` 留空即可,兩個版位維持佔位框,不影響網站。
+2. **核准後開廣告**:在 AdSense 後台為「內容上方」「結果下方」各建立一個
+   **多媒體廣告單元**,各會拿到一組版位代碼(一串數字)。把它們分別填進
+   `slotTop`、`slotBottom`,存檔推上線 → 兩個版位開始顯示廣告。
+   - 不用改 HTML 其他地方,程式會自動用你的 `pub` + 版位代碼產生廣告。
+
+**隱私權政策(已內建)**:AdSense 要求網站有隱私權政策。已新增 `privacy/index.html`
+(網址 `…/transcribe/privacy/`),三個頁面頁尾都有連結。裡面已寫明 Google 廣告 Cookie 的
+使用與停用方式;**請把該頁最後的聯絡信箱換成你要公開的信箱**(HTML 內已用註解標好位置)。
+> 若你的訪客可能來自歐盟 / 英國,Google 另會要求顯示 Cookie 同意視窗(CMP)。可日後在
+> AdSense 後台的「隱私權與訊息」啟用 Google 內建同意訊息,本次未加。
+
+**ads.txt(已附範本,含 github.io 限制說明)**:根目錄有 `ads.txt` 範本。核准後把裡面的
+`pub-XXXXXXXXXXXXXXXX` 換成你的發布商號碼(即 `ca-pub-…` 去掉開頭 `ca-`)。
+> ⚠️ 限制:AdSense 只讀「**網域根目錄**」的 ads.txt。本站是 GitHub Pages **專案頁**
+> (`…github.io/transcribe/`),這個檔會落在 `…/transcribe/ads.txt`,不是網域根,Google
+> 讀不到,只會在後台顯示「earnings at risk」提醒——**不影響審核與廣告顯示、也不影響收入**。
+> 想讓提醒消失,兩種正解:(1) 之後改綁**自訂網域**;(2) 另外建一個名為
+> `hosanna0813-sys.github.io` 的 repo(使用者頁),把 `ads.txt` 放它根目錄,即成為
+> `hosanna0813-sys.github.io/ads.txt`。可日後再處理。

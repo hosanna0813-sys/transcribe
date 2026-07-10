@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
+<title>隱私權政策 — 語音轉逐字稿</title>
+<meta name="description" content="語音轉逐字稿服務的隱私權政策:說明資料處理方式、第三方廣告(Google AdSense)Cookie 使用與你的選擇。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F6FA; --card:#FFFFFF; --ink:#18213A; --muted:#65718A;
+    --accent:#3B5BDB; --accent-soft:#EDF1FE; --line:#E3E8F0;
+    --radius:14px; --radius-s:9px;
+    --shadow:0 1px 2px rgba(24,33,58,.05),0 10px 30px rgba(24,33,58,.07);
+  }
+  [data-mode=dark]{
+    --bg:#0E1320; --card:#171E2E; --ink:#E7EBF4; --muted:#93A0B8;
+    --accent:#7B96F4; --accent-soft:#232E4E; --line:#2A3550;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 14px 36px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Noto Sans TC',system-ui,-apple-system,sans-serif;
+    background:var(--bg);color:var(--ink);min-height:100vh;
+    padding:28px 16px 64px;line-height:1.75;
+    transition:background .25s,color .25s;
+  }
+  .wrap{max-width:680px;margin:0 auto}
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;gap:12px}
+  .brand{display:flex;align-items:center;gap:12px;min-width:0}
+  .logo{
+    width:42px;height:42px;flex:none;border-radius:12px;
+    background:linear-gradient(135deg,var(--accent),#7B5BD6);
+    display:flex;align-items:center;justify-content:center;color:#fff;
+  }
+  .logo svg{width:22px;height:22px}
+  .brand h1{font-size:1.25rem;font-weight:700;letter-spacing:.04em;line-height:1.3}
+  .brand p{font-size:.78rem;color:var(--muted)}
+  #modeBtn{
+    width:38px;height:38px;flex:none;border-radius:50%;border:1px solid var(--line);
+    background:var(--card);cursor:pointer;font-size:1rem;line-height:1;
+  }
+  #modeBtn:hover{border-color:var(--accent)}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    box-shadow:var(--shadow);padding:26px 26px 30px;
+  }
+  .card h2{font-size:1.35rem;font-weight:700;margin-bottom:6px}
+  .updated{font-size:.78rem;color:var(--muted);margin-bottom:20px}
+  h3{font-size:1.02rem;font-weight:700;margin:22px 0 8px}
+  p,li{font-size:.9rem;color:var(--ink)}
+  p{margin-bottom:10px}
+  ul{padding-left:1.3em;margin-bottom:10px}
+  li{margin-bottom:6px}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .muted{color:var(--muted);font-size:.82rem}
+  footer{text-align:center;font-size:.78rem;color:var(--muted);margin-top:18px;line-height:1.9}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a class="brand" href="../" style="text-decoration:none;color:inherit">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
+        </svg>
+      </div>
+      <div>
+        <h1>語音轉逐字稿</h1>
+        <p>隱私權政策</p>
+      </div>
+    </a>
+    <button id="modeBtn" title="切換深色模式">🌙</button>
+  </div>
+
+  <div class="card">
+    <h2>隱私權政策</h2>
+    <div class="updated">最後更新:2026 年 7 月</div>
+
+    <p>本政策說明本服務(以下稱「本站」)如何蒐集、使用與保護你的資料,以及第三方廣告的運作方式。使用本站即表示你同意本政策所述之處理方式。</p>
+
+    <h3>一、本站提供的服務</h3>
+    <p>本站將你的音檔或 YouTube 影片片段,透過人工智慧轉換成逐字稿。分為三種使用方式:免登入的免費試用、登入後可儲值的付費版,以及自備 OpenAI 金鑰的進階版。</p>
+
+    <h3>二、我們如何處理你的內容</h3>
+    <ul>
+      <li><b>音訊與逐字稿</b>:你上傳的音檔或指定的 YouTube 片段,會傳送至 OpenAI 進行語音辨識與校正。內容僅用於完成該次轉錄,處理完成後即從伺服器暫存區清除,不作其他用途。</li>
+      <li><b>免費試用</b>:為防止濫用,系統會記錄你的來源 IP 當日累計使用時間(僅供計算每日免費額度),不與轉錄內容綁定。</li>
+      <li><b>登入 / 付費版</b>:使用電子郵件登入(由 Supabase 提供驗證),我們會保存你的電子郵件、額度餘額與使用紀錄(日期、來源、長度、花費),供你查詢與對帳。</li>
+      <li><b>進階版(自備金鑰)</b>:你的 OpenAI API Key 與偏好設定只儲存在你自己裝置的瀏覽器,不會上傳到本站伺服器。</li>
+    </ul>
+    <p class="muted">提醒:涉及機密或個資的內容,請先確認符合你所屬單位的資安規範再上傳。</p>
+
+    <h3>三、金流</h3>
+    <p>付費儲值透過綠界科技(ECPay)處理刷卡 / 行動支付。你的完整卡號等付款資訊由綠界處理,本站不會取得或保存。本站僅收到綠界的付款結果通知以完成額度入帳。</p>
+
+    <h3>四、第三方廣告(Google AdSense)</h3>
+    <p>本站使用 Google AdSense 顯示廣告。相關說明:</p>
+    <ul>
+      <li>Google 等第三方供應商會使用 Cookie,依你造訪本站與其他網站的紀錄放送廣告。</li>
+      <li>Google 使用廣告 Cookie 可讓其合作夥伴根據你的造訪放送廣告。</li>
+      <li>你可以前往 <a href="https://adssettings.google.com" target="_blank" rel="noopener">Google 廣告設定</a> 停用個人化廣告,或透過 <a href="https://www.aboutads.info" target="_blank" rel="noopener">www.aboutads.info</a> 停用部分第三方供應商的 Cookie。</li>
+      <li>更多資訊請見 <a href="https://policies.google.com/technologies/ads" target="_blank" rel="noopener">Google 廣告與隱私權說明</a>。</li>
+    </ul>
+
+    <h3>五、Cookie 與本機儲存</h3>
+    <p>本站會在你的瀏覽器儲存少量資料(例如深色模式偏好、進階版的金鑰與設定),用以記住你的選擇。廣告相關 Cookie 由上述第三方供應商設定。你可隨時在瀏覽器清除這些資料。</p>
+
+    <h3>六、你的權利</h3>
+    <p>你可要求查詢、更正或刪除我們保存的帳號資料。如需協助,請透過下方信箱與我們聯絡。</p>
+
+    <h3>七、政策更新</h3>
+    <p>本政策可能因服務調整而更新,更新後將於本頁公告。</p>
+
+    <h3>八、聯絡方式</h3>
+    <!-- 營運者:請把下面的信箱換成你想公開的聯絡信箱 -->
+    <p>如對本政策有任何疑問,請來信:<a href="mailto:hosanna0813@gmail.com">hosanna0813@gmail.com</a></p>
+  </div>
+
+  <footer>
+    <a href="../">← 回首頁</a> · <a href="../v2/">登入 / 儲值</a> · <a href="../byok/">進階版</a>
+  </footer>
+
+</div>
+
+<script>
+(function(){
+  var modeBtn=document.getElementById('modeBtn');
+  function applyMode(m){document.documentElement.setAttribute('data-mode',m);modeBtn.textContent=m==='dark'?'☀️':'🌙';}
+  try{applyMode(localStorage.getItem('tw_mode')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'));}
+  catch(e){applyMode('light');}
+  modeBtn.addEventListener('click',function(){
+    var next=document.documentElement.getAttribute('data-mode')==='dark'?'light':'dark';
+    applyMode(next);try{localStorage.setItem('tw_mode',next);}catch(e){}
+  });
+})();
+</script>
+</body>
+</html>

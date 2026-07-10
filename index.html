@@ -9,11 +9,18 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
-<!-- ⬇⬇ AdSense:營運者取得帳號後,把下面兩處 ca-pub-XXXXXXXXXXXXXXXX 換成自己的發布商 ID,
-     並把各廣告版位的 data-ad-slot 換成後台建立的版位代碼,再取消註解啟用 script。 ⬇⬇ -->
-<!--
-<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXXXX" crossorigin="anonymous"></script>
--->
+<!-- ⬇⬇ AdSense 設定:只要在這裡填,不必動其他地方 ⬇⬇
+     1) 申請 AdSense 拿到發布商 ID 後,把 pub 填成 'ca-pub-1234567890123456' → 廣告程式自動載入,即可送審。
+     2) 通過審核後,在 AdSense 後台為「內容上方」「結果下方」各建一個廣告單元,
+        把取得的版位代碼填進 slotTop / slotBottom → 兩個版位就會開始顯示廣告。
+     全部留空時,頁面顯示「待啟用」佔位框,功能與版面完全不受影響。 -->
+<script>
+window.ADS = {
+  pub: '',        // 例:'ca-pub-1234567890123456'
+  slotTop: '',    // 例:'1234567890'(內容上方)
+  slotBottom: ''  // 例:'0987654321'(結果下方)
+};
+</script>
 <style>
   :root{
     --bg:#F4F6FA; --card:#FFFFFF; --ink:#18213A; --muted:#65718A;
@@ -217,15 +224,8 @@
     </ul>
   </div>
 
-  <!-- 廣告版位(上) -->
-  <div class="ad-slot" id="adTop">
-    廣告版位(AdSense · 待啟用)
-    <!-- 啟用 AdSense 後,把上面文字整段換成:
-    <ins class="adsbygoogle" style="display:block" data-ad-client="ca-pub-XXXXXXXXXXXXXXXX"
-         data-ad-slot="0000000000" data-ad-format="auto" data-full-width-responsive="true"></ins>
-    <script>(adsbygoogle=window.adsbygoogle||[]).push({});</script>
-    -->
-  </div>
+  <!-- 廣告版位(上);內容由 initAds() 依 window.ADS 設定自動填入 -->
+  <div class="ad-slot" id="adTop">廣告版位(AdSense · 待啟用)</div>
 
   <!-- 試用卡片 -->
   <div class="card">
@@ -290,10 +290,8 @@
     </section>
   </div>
 
-  <!-- 廣告版位(下) -->
-  <div class="ad-slot" id="adBottom">
-    廣告版位(AdSense · 待啟用)
-  </div>
+  <!-- 廣告版位(下);內容由 initAds() 依 window.ADS 設定自動填入 -->
+  <div class="ad-slot" id="adBottom">廣告版位(AdSense · 待啟用)</div>
 
   <!-- 升級 CTA -->
   <div class="upsell">
@@ -304,7 +302,8 @@
 
   <footer>
     想用自己的 OpenAI Key、不限次數?<a href="byok/">前往進階版(自備金鑰)→</a><br>
-    轉錄由 AI 產生,可能有誤,請自行校對。
+    轉錄由 AI 產生,可能有誤,請自行校對。<br>
+    <a href="privacy/">隱私權政策</a>
   </footer>
 
 </div>
@@ -469,6 +468,31 @@
     var a=document.createElement('a');a.href=URL.createObjectURL(blob);
     a.download='transcript.txt';a.click();URL.revokeObjectURL(a.href);
   });
+
+  /* AdSense:依 window.ADS 設定啟用;未設定則保留佔位框(不影響功能) */
+  function initAds(){
+    var cfg=window.ADS||{};
+    var pub=(cfg.pub||'').trim();
+    if(!/^ca-pub-\d{10,}$/.test(pub))return;              // 沒填合法發布商 ID → 維持佔位
+    var s=document.createElement('script');
+    s.async=true;s.crossOrigin='anonymous';
+    s.src='https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client='+encodeURIComponent(pub);
+    document.head.appendChild(s);                          // 載入即可通過擁有權驗證、送審
+    [['adTop',cfg.slotTop],['adBottom',cfg.slotBottom]].forEach(function(p){
+      var box=$(p[0]),slot=(p[1]||'').trim();
+      if(!box||!slot)return;                               // 版位代碼未填 → 該槽維持佔位
+      box.innerHTML='';box.style.border='none';box.style.minHeight='0';
+      var ins=document.createElement('ins');
+      ins.className='adsbygoogle';ins.style.display='block';
+      ins.setAttribute('data-ad-client',pub);
+      ins.setAttribute('data-ad-slot',slot);
+      ins.setAttribute('data-ad-format','auto');
+      ins.setAttribute('data-full-width-responsive','true');
+      box.appendChild(ins);
+      try{(window.adsbygoogle=window.adsbygoogle||[]).push({});}catch(e){}
+    });
+  }
+  initAds();
 })();
 </script>
 </body>

@@ -1,0 +1,10 @@
+# AdSense ads.txt — 通過審核、建立廣告單元後,把下面 pub-XXXX 換成你的發布商號碼
+# (即 ca-pub-1234567890123456 去掉開頭的 "ca-",變成 pub-1234567890123456)。
+# f08c47fec0942fa0 是 Google 固定的認證授權碼,不要改。
+#
+# 注意:AdSense 只讀「網域根目錄」的 ads.txt。本站是 GitHub Pages 專案頁
+#   (…github.io/transcribe/),此檔會落在 …/transcribe/ads.txt,而非網域根,
+#   Google 讀不到,只會在後台顯示「earnings at risk」提醒 —— 不影響審核與廣告顯示。
+#   若要讓提醒消失:改用自訂網域,或另建 hosanna0813-sys.github.io 使用者頁 repo
+#   把 ads.txt 放到根目錄。詳見 v2/README.md 的 AdSense 段落。
+google.com, pub-XXXXXXXXXXXXXXXX, DIRECT, f08c47fec0942fa0
