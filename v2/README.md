@@ -211,6 +211,23 @@ SQL Editor → 貼上 `v2/schema_phase3.sql` 整份 → **Run**。
 
 **設定**:Supabase SQL Editor 跑 `v2/schema_history.sql`(建立刪除函式)。列表本身無需設定。
 
+---
+
+# 階段六:帳務修正 + 試用持久化(建議盡快套用)
+
+SQL Editor → 貼上 `v2/schema_phase6.sql` 整份 → **Run**(可重複執行)。這份會:
+- **修正一個帳務 bug**:先前結算時若實際秒數比預留少,退差額會把「免費額度退成付費
+  credits」、且免費用量沒退回。改為**按來源分別退回**(免費退免費、付費退付費),
+  並在 `usage_logs` 記 `charged_free`/`charged_paid`。
+- 補 **CHECK 約束**(role、餘額非負、status、source、付款金額)與索引。
+- **免費試用改資料庫持久化**:新增 `trial_usage`/`trial_global` 兩表與 RPC。
+  設好 `SUPABASE_URL`+`SUPABASE_SERVICE_ROLE_KEY` 後,首頁試用額度即改由資料庫計量
+  ——**伺服器重啟不再歸零、多實例一致**;未設定 Supabase 時自動退回記憶體模式(byok 部署)。
+- **逐字稿結果 TTL**:完成的逐字稿預設 24 小時後由 watchdog 自動去內容化(帳務保留)。
+  想改天數,可在 Supabase 執行 `alter database postgres set app.result_ttl_hours = 48;`。
+
+套用後無需改前端;後端偵測到 Supabase 就自動改用資料庫試用計量。
+
 # 金流:綠界 ECPay 線上儲值
 
 使用者可在帳號頁的「儲值」區塊選方案 → 線上刷卡 / LINE Pay 付款 → 額度自動入帳。
