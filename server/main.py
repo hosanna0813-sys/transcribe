@@ -1662,11 +1662,15 @@ def _trial_reserve(keys, cost: int):
         keys = [keys]
     per_key, total = _trial_limits()
     if _trial_db_enabled():
-        row = _rpc1("trial_reserve", {"p_keys": keys, "p_cost": cost,
-                                      "p_per_key_limit": per_key, "p_total_limit": total})
-        if row and row.get("ok"):
-            return True, None
-        return False, (row or {}).get("reason") or "ip"
+        try:
+            row = _rpc1("trial_reserve", {"p_keys": keys, "p_cost": cost,
+                                          "p_per_key_limit": per_key, "p_total_limit": total})
+        except Exception:
+            row = "db_error"   # RPC 尚未建立(migration 未跑)或暫時不可用 → 退回記憶體
+        if row != "db_error":
+            if row and row.get("ok"):
+                return True, None
+            return False, (row or {}).get("reason") or "ip"
     today = _trial_today()
     with _trial_lock:
         if _trial_global.get("date") != today:
