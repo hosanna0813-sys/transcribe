@@ -78,7 +78,7 @@ def dbmain(monkeypatch):
     monkeypatch.setattr(main, "_user_rate_check", lambda uid: None)
     monkeypatch.setattr(main, "rate_check", lambda b, r: None)
     monkeypatch.setattr(main, "_content_length_precheck", lambda r: None)
-    monkeypatch.setattr(main, "probe", lambda url: {"duration": 600})
+    monkeypatch.setattr(main, "_relay_info", lambda url: {"duration": 600, "too_long": False})
     monkeypatch.setattr(main, "_reject_live", lambda meta: None)
     monkeypatch.setattr(main, "_relay_fetch_audio", lambda url, s, e, dest: open(dest, "wb").write(b"x"))
     monkeypatch.setattr(main, "_transcode_and_segment", lambda src, tmp: ["seg0", "seg1"])
