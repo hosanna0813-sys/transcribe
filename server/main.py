@@ -1339,14 +1339,20 @@ def api_create_job(
             raise HTTPException(400, "請提供音檔或 YouTube 網址")
 
         cost = int(math.ceil(duration))
-        res = _sb_rpc("enqueue_transcription", {
-            "p_user_id": uid, "p_cost": cost,
-            "p_source_type": source_type, "p_source_name": source_name, "p_duration": cost,
-            "p_free_limit": _free_daily_credits(),
-            "p_youtube_url": youtube_url if source_type == "youtube" else None,
-            "p_start": yt_start, "p_end": yt_end,
-            "p_upload_path": upload_path, "p_correct": bool(correct),
-        })
+        try:
+            res = _sb_rpc("enqueue_transcription", {
+                "p_user_id": uid, "p_cost": cost,
+                "p_source_type": source_type, "p_source_name": source_name, "p_duration": cost,
+                "p_free_limit": _free_daily_credits(),
+                "p_youtube_url": youtube_url if source_type == "youtube" else None,
+                "p_start": yt_start, "p_end": yt_end,
+                "p_upload_path": upload_path, "p_correct": bool(correct),
+            })
+        except HTTPException as e:
+            # migration(schema_phase8)尚未套用時 RPC 不存在 → 給明確訊息(短音檔仍可用)
+            if "PGRST202" in str(getattr(e, "detail", "")) or "enqueue_transcription" in str(getattr(e, "detail", "")):
+                raise HTTPException(503, "長音檔背景轉錄升級中,暫時無法使用(站長:請套用 v2/schema_phase8.sql)")
+            raise
         row = res[0] if isinstance(res, list) else res
         if not row or not row.get("ok"):
             reason = (row or {}).get("reason")
