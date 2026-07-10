@@ -42,6 +42,14 @@ RATE_LIMITS = {"info": 30, "audio": 10}   # 每 IP 每小時
 _rate_lock = threading.Lock()
 _rate_hits: dict = defaultdict(deque)     # (bucket, ip) -> deque[timestamp]
 _audio_slots = threading.Semaphore(2)     # 同時最多 2 個下載工作
+try:
+    RELAY_SLOT_WAIT_SECONDS = int(os.environ.get("RELAY_SLOT_WAIT_SECONDS", "180"))
+except ValueError:
+    RELAY_SLOT_WAIT_SECONDS = 180         # /audio 槽滿時最多等這麼久(而非立刻 429)
+try:
+    FETCH_MAX_SECONDS = int(os.environ.get("FETCH_MAX_SECONDS", "1500"))
+except ValueError:
+    FETCH_MAX_SECONDS = 1500              # 單次 yt-dlp 下載硬上限,防卡死長期佔槽
 
 # 同請求去重:瀏覽器對久跑的 /audio 會在 300 秒斷線重試(Chrome 硬限制),
 # 重試必須「接上」進行中的下載,而不是再開一份重複下載互搶頻寬。
@@ -372,7 +380,8 @@ def audio(
         job.refs += 1
 
     if owner:
-        if not _audio_slots.acquire(blocking=False):
+        # 等槽而非硬擋:前一個下載結束會釋放槽,呼叫端有耐心,稍等即可進場
+        if not _audio_slots.acquire(timeout=RELAY_SLOT_WAIT_SECONDS):
             job.error = HTTPException(429, "伺服器忙碌中(同時處理數已滿),請稍候一分鐘再試")
             job.done.set()
         else:
@@ -403,6 +412,15 @@ def audio(
     )
 
 
+def _fetch_deadline_hook(deadline: float):
+    """yt-dlp 下載進度掛鉤:超過 deadline 就中止,避免過慢/卡住的下載長期佔用下載槽"""
+    def hook(d):
+        if time.time() > deadline:
+            raise yt_dlp.utils.DownloadError(
+                f"下載逾時(超過 {FETCH_MAX_SECONDS} 秒),請改截取較短片段")
+    return hook
+
+
 def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float | None):
     base_opts = _ydl_base({
         "format": "bestaudio[abr<=96]/bestaudio/best",
@@ -410,6 +428,8 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
         "max_filesize": MAX_FILE_BYTES,
         # 直播存檔等分段格式常被 YouTube 限速,開 8 線並行下載分段
         "concurrent_fragment_downloads": 8,
+        # 整體下載硬逾時(每 socket 30 秒之外的兜底,防卡死佔槽)
+        "progress_hooks": [_fetch_deadline_hook(time.time() + FETCH_MAX_SECONDS)],
     })
 
     def _cleanup_partial():
