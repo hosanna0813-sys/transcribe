@@ -60,6 +60,11 @@ services:
         sync: false
       - key: MAX_RELAY_DOWNLOAD_SECONDS
         sync: false
+      # 家用中繼:/audio 下載槽滿時最多等待秒數(預設 180);單次下載硬逾時(預設 1500)
+      - key: RELAY_SLOT_WAIT_SECONDS
+        sync: false
+      - key: FETCH_MAX_SECONDS
+        sync: false
       # 背景任務就地 Worker 同時處理數(免費方案單實例,預設 1;記憶體允許可調 2)
       - key: WORKER_CONCURRENCY
         sync: false
