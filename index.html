@@ -134,8 +134,17 @@ window.ADS = {
   .drop small{font-size:.76rem;display:block;margin-top:2px}
   .filename{margin-top:10px;font-size:.85rem;color:var(--ink);word-break:break-all}
 
-  .yt-preview{margin-top:14px;border-radius:var(--radius-s);overflow:hidden;background:#000;aspect-ratio:16/9}
-  .yt-preview iframe{width:100%;height:100%;border:0;display:block}
+  .yt-preview{margin-top:14px}
+  .yt-frame{border-radius:var(--radius-s);overflow:hidden;background:#000;aspect-ratio:16/9;position:relative}
+  .yt-frame iframe{width:100%;height:100%;border:0;display:block}
+  .yt-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:.82rem}
+  .yt-actions{display:flex;gap:8px;margin-top:8px}
+  .yt-mark{
+    padding:7px 14px;border:1px solid var(--line);border-radius:7px;background:var(--card);
+    color:var(--muted);font-family:inherit;font-size:.8rem;cursor:pointer;
+  }
+  .yt-mark:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+  .yt-mark:disabled{opacity:.4;cursor:default}
   .trim-row{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
   .trim-row>div{flex:1;min-width:120px}
   .trim-row input{width:100%}
@@ -157,6 +166,19 @@ window.ADS = {
   .msg.err{background:var(--err-soft);color:var(--err)}
   .msg.info{background:var(--accent-soft);color:var(--accent)}
 
+  /* ---------- 進度 ---------- */
+  .prog{margin-top:14px;display:none}
+  .prog.show{display:block}
+  .prog-track{height:8px;background:var(--accent-soft);border-radius:999px;overflow:hidden}
+  .prog-fill{
+    height:100%;width:0;border-radius:999px;background:var(--accent);
+    transition:width .8s ease;
+    background-image:linear-gradient(45deg,rgba(255,255,255,.25) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.25) 50%,rgba(255,255,255,.25) 75%,transparent 75%);
+    background-size:22px 22px;animation:slide 1s linear infinite;
+  }
+  @keyframes slide{to{background-position:22px 0}}
+  .prog-txt{font-size:.78rem;color:var(--muted);margin-top:7px;text-align:center}
+
   .remain{font-size:.78rem;color:var(--muted);margin-top:10px;text-align:center}
   .remain b{color:var(--accent)}
 
@@ -173,6 +195,17 @@ window.ADS = {
     width:100%;min-height:200px;resize:vertical;line-height:1.8;font-size:.9rem;
     padding:14px;background:var(--bg);
   }
+  .rtabs{display:flex;gap:6px;margin-bottom:10px}
+  .rtab{
+    padding:6px 14px;border:1px solid var(--line);border-radius:999px;background:var(--card);
+    color:var(--muted);font-family:inherit;font-size:.78rem;cursor:pointer;
+  }
+  .rtab.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);font-weight:700}
+  .stats{font-size:.76rem;color:var(--muted);margin-top:10px;text-align:right}
+  .precheck{font-size:.78rem;margin-top:8px;display:none}
+  .precheck.show{display:block}
+  .precheck.err{color:var(--err)}
+  .precheck.ok{color:var(--muted)}
 
   /* ---------- 升級 CTA ---------- */
   .upsell{
@@ -245,17 +278,24 @@ window.ADS = {
       <div id="paneFile">
         <div class="drop" id="drop">
           <b>點此選擇</b> 或拖曳音檔到這裡
-          <small>MP3 / M4A / WAV… · 單檔 ≤ <span class="minTxt">10</span> 分鐘、100 MB</small>
+          <small>MP3 / M4A / WAV / MP4… · 單檔 ≤ <span class="minTxt">10</span> 分鐘、100 MB</small>
         </div>
-        <input type="file" id="fileInput" accept="audio/*,video/*" hidden>
+        <input type="file" id="fileInput" accept=".mp3,.m4a,.wav,.mp4,.webm,.aac,.flac,.ogg,.mpeg,.mpga,audio/*,video/*" hidden>
         <div class="filename hidden" id="fileName"></div>
+        <div class="precheck" id="precheck"></div>
       </div>
 
       <!-- YouTube 模式 -->
       <div id="paneYt" class="hidden">
         <label class="fld" for="ytUrl">YouTube 網址</label>
         <input type="url" id="ytUrl" placeholder="https://www.youtube.com/watch?v=...">
-        <div class="yt-preview hidden" id="ytPreview"></div>
+        <div class="yt-preview hidden" id="ytPreview">
+          <div class="yt-frame" id="ytFrame"><div class="yt-loading" id="ytLoading">載入播放器中…</div></div>
+          <div class="yt-actions">
+            <button type="button" class="yt-mark" id="markStart" disabled>設為起點</button>
+            <button type="button" class="yt-mark" id="markEnd" disabled>設為終點</button>
+          </div>
+        </div>
         <div class="trim-row">
           <div>
             <label class="fld" for="ytStart">起點(選填)</label>
@@ -266,15 +306,31 @@ window.ADS = {
             <input type="text" id="ytEnd" placeholder="例:11:00">
           </div>
         </div>
-        <p class="hint">可填「秒」、「分:秒」或「時:分:秒」。免費試用僅截取 <span class="minTxt">10</span> 分鐘內;不填則從頭取前 <span class="minTxt">10</span> 分鐘。</p>
+        <p class="hint">播放到想要的位置按「設為起點/終點」,或手動填「秒」、「分:秒」、「時:分:秒」。免費試用僅截取 <span class="minTxt">10</span> 分鐘內;不填則從頭取前 <span class="minTxt">10</span> 分鐘。</p>
       </div>
 
       <label class="check">
         <input type="checkbox" id="optCorrect" checked>
         <span>AI 校正錯字與標點<small>用 AI 修飾逐字稿,讓內容更通順(建議開啟)</small></span>
       </label>
+      <label class="check">
+        <input type="checkbox" id="optTs">
+        <span>加入時間軸<small>每段開頭標 [時:分:秒],方便對照原音</small></span>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="optFillers">
+        <span>刪除口頭贅詞<small>清除「嗯、啊、就是說、那個」等填充詞(需開啟 AI 校正)</small></span>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="optSpeakers">
+        <span>推測講者(實驗性)<small>AI 依語意標「甲:」「乙:」,僅適合兩人對話(需開啟 AI 校正)</small></span>
+      </label>
 
       <button class="btn" id="goBtn" type="button">免費轉錄</button>
+      <div class="prog" id="prog">
+        <div class="prog-track"><div class="prog-fill" id="progFill"></div></div>
+        <div class="prog-txt" id="progTxt"></div>
+      </div>
       <div class="msg" id="msg"></div>
       <div class="remain" id="remain"></div>
     </section>
@@ -287,10 +343,16 @@ window.ADS = {
         <h3>逐字稿結果</h3>
         <div class="result-actions">
           <button id="copyBtn" type="button">複製</button>
+          <button id="wordBtn" type="button">下載 Word</button>
           <button id="dlBtn" type="button">下載 .txt</button>
         </div>
       </div>
-      <textarea id="resultText" readonly></textarea>
+      <div class="rtabs hidden" id="rtabs">
+        <button type="button" class="rtab on" id="tabFixed">校正版</button>
+        <button type="button" class="rtab" id="tabRaw">原始版</button>
+      </div>
+      <textarea id="resultText" placeholder="可直接在此編輯"></textarea>
+      <div class="stats" id="stats"></div>
     </section>
   </div>
 
@@ -357,25 +419,104 @@ window.ADS = {
   ['dragleave','drop'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove('over');});});
   drop.addEventListener('drop',function(e){if(e.dataTransfer.files.length){fileInput.files=e.dataTransfer.files;onFile();}});
   fileInput.addEventListener('change',onFile);
+  var fileBlocked=false;   // 預檢不過就擋送出
+  function setPre(text,kind){
+    var p=$('precheck');
+    if(!text){p.className='precheck';p.textContent='';return;}
+    p.className='precheck show '+kind;p.textContent=text;
+  }
   function onFile(){
     var f=fileInput.files[0];
-    if(f){$('fileName').textContent='已選擇:'+f.name;show('fileName');}
-    else hide('fileName');
+    fileBlocked=false;setPre('');
+    if(!f){hide('fileName');return;}
+    $('fileName').textContent='已選擇:'+f.name;show('fileName');
+    if(f.size>100*1024*1024){
+      fileBlocked=true;
+      setPre('檔案超過 100 MB 上限,請壓縮或截短後再試。','err');
+      return;
+    }
+    /* 用瀏覽器讀時長,超過試用上限立即提示,免得整檔上傳完才被拒 */
+    var url=URL.createObjectURL(f);
+    var au=document.createElement('audio');
+    au.preload='metadata';
+    au.onloadedmetadata=function(){
+      URL.revokeObjectURL(url);
+      var dur=au.duration;
+      if(isFinite(dur)&&dur>0){
+        if(dur>trialMin*60+1){
+          fileBlocked=true;
+          setPre('這個檔約 '+fmtDur(dur)+',超過免費試用 '+trialMin+' 分鐘上限。請截短後再試,或到計費版轉錄長音檔。','err');
+        }else{
+          setPre('檔案長度約 '+fmtDur(dur)+',可以轉錄。','ok');
+        }
+      }
+      /* 讀不到時長就放行,後端仍會檢查 */
+    };
+    au.onerror=function(){URL.revokeObjectURL(url);};
+    au.src=url;
   }
 
-  /* YouTube 預覽 */
+  /* YouTube 預覽播放器(IFrame API,可標記起訖) */
   function ytId(url){
     var m=url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([\w-]{11})/);
     return m?m[1]:null;
   }
-  var lastId=null;
+  function fmtDur(sec){
+    sec=Math.round(sec);
+    var h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60;
+    function p(n){return (n<10?'0':'')+n;}
+    return h?h+':'+p(m)+':'+p(s):m+':'+p(s);
+  }
+  var _ytApiState='idle',_ytApiWaiters=[];
+  function ytApiReady(cb){
+    /* 一律非同步呼叫 cb(即使已 ready),確保 DOM 已掛回文件 */
+    if(_ytApiState==='ready'){setTimeout(cb,0);return;}
+    _ytApiWaiters.push(cb);
+    if(_ytApiState==='loading')return;
+    _ytApiState='loading';
+    window.onYouTubeIframeAPIReady=function(){
+      _ytApiState='ready';
+      _ytApiWaiters.forEach(function(fn){fn();});
+      _ytApiWaiters=[];
+    };
+    var s=document.createElement('script');
+    s.src='https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  }
+  var lastId=null,ytPlayer=null;
+  function destroyPlayer(){
+    if(ytPlayer){try{ytPlayer.destroy();}catch(e){}ytPlayer=null;}
+    $('markStart').disabled=true;$('markEnd').disabled=true;
+  }
   $('ytUrl').addEventListener('input',function(){
     var id=ytId(($('ytUrl').value||'').trim());
     if(id===lastId)return;lastId=id;
-    var box=$('ytPreview');
-    if(id){box.innerHTML='<iframe allow="encrypted-media" allowfullscreen src="https://www.youtube.com/embed/'+id+'"></iframe>';show(box);}
-    else{box.innerHTML='';hide(box);}
+    destroyPlayer();
+    var frame=$('ytFrame');
+    frame.innerHTML='<div class="yt-loading" id="ytLoading">載入播放器中…</div>';
+    if(!id){hide('ytPreview');return;}
+    show('ytPreview');
+    var mount=document.createElement('div');mount.id='ytpv-mount';
+    frame.appendChild(mount);
+    ytApiReady(function(){
+      if(!frame.isConnected||lastId!==id)return;
+      ytPlayer=new YT.Player('ytpv-mount',{
+        videoId:id,
+        playerVars:{rel:0},
+        events:{onReady:function(){
+          var l=$('ytLoading');if(l)l.style.display='none';
+          $('markStart').disabled=false;$('markEnd').disabled=false;
+        }}
+      });
+    });
   });
+  function markTime(which){
+    if(!ytPlayer)return;
+    var val=fmtDur(ytPlayer.getCurrentTime());
+    $(which==='start'?'ytStart':'ytEnd').value=val;
+  }
+  $('markStart').addEventListener('click',function(){markTime('start');});
+  $('markEnd').addEventListener('click',function(){markTime('end');});
 
   function parseTime(str){
     str=(str||'').trim();
@@ -407,7 +548,84 @@ window.ADS = {
     $('remain').innerHTML='今日剩餘免費額度:<b>'+min+'</b> 分鐘';
   }
 
-  /* 送出轉錄 */
+  /* 贅詞/講者需搭配 AI 校正 */
+  function syncOptDeps(){
+    var on=$('optCorrect').checked;
+    ['optFillers','optSpeakers'].forEach(function(id){
+      $(id).disabled=!on;
+      if(!on)$(id).checked=false;
+    });
+  }
+  $('optCorrect').addEventListener('change',syncOptDeps);
+  syncOptDeps();
+
+  /* 階段進度(單一請求,以經過時間推進;完成即滿格) */
+  var progTimer=null,progStartAt=0;
+  var STAGES=[[0,5,'喚醒伺服器中…(閒置後第一次約需 30–60 秒)'],
+              [15,30,'取得音訊中…'],
+              [40,55,'AI 轉錄中…'],
+              [75,80,'AI 校正中…']];
+  function progBegin(){
+    progStartAt=Date.now();
+    $('prog').classList.add('show');
+    progTick();
+    progTimer=setInterval(progTick,3000);
+  }
+  function progTick(){
+    var el=(Date.now()-progStartAt)/1000,pct=5,txt=STAGES[0][2];
+    for(var i=0;i<STAGES.length;i++){
+      if(el>=STAGES[i][0]){pct=STAGES[i][1];txt=STAGES[i][2];}
+    }
+    pct=Math.min(pct+el/8,92);   // 緩慢爬升,最多 92%,完成才滿格
+    $('progFill').style.width=pct+'%';
+    $('progTxt').textContent=txt;
+  }
+  function progEnd(){
+    if(progTimer){clearInterval(progTimer);progTimer=null;}
+    $('progFill').style.width='100%';
+    var p=$('prog');
+    setTimeout(function(){p.classList.remove('show');$('progFill').style.width='0';},600);
+  }
+
+  /* 送出:網路例外與 503/504(伺服器喚醒中)自動退避重試;
+     其他錯誤(400/402/413/429/502)不重試,以免重扣試用額度 */
+  function sendTrial(form,attempt){
+    return fetch(BACKEND_URL+'/api/trial',{method:'POST',
+      headers:{'ngrok-skip-browser-warning':'1'},body:form})
+      .then(function(res){
+        if((res.status===503||res.status===504)&&attempt<2){
+          return retryLater(form,attempt,'伺服器喚醒中,自動重試…');
+        }
+        return res.text().then(function(t){
+          var d;try{d=JSON.parse(t);}catch(err){d={};}
+          if(!res.ok)throw new Error(d.detail||('伺服器錯誤(HTTP '+res.status+')'));
+          return d;
+        });
+      },function(){
+        if(attempt<2)return retryLater(form,attempt,'連線中斷,自動重試…');
+        throw new Error('連線失敗,請檢查網路後再試');
+      });
+  }
+  function retryLater(form,attempt,note){
+    $('progTxt').textContent=note+'(第 '+(attempt+1)+' 次)';
+    return new Promise(function(ok){setTimeout(ok,(attempt+1)*2000);})
+      .then(function(){return sendTrial(form,attempt+1);});
+  }
+
+  /* 結果狀態:兩個版本 + 目前分頁,編輯即回存 */
+  var result={fixed:'',raw:'',hasFixed:false},curTab='fixed';
+  function setTab(tab){
+    curTab=tab;
+    $('tabFixed').classList.toggle('on',tab==='fixed');
+    $('tabRaw').classList.toggle('on',tab==='raw');
+    $('resultText').value=tab==='fixed'?result.fixed:result.raw;
+  }
+  $('tabFixed').addEventListener('click',function(){setTab('fixed');});
+  $('tabRaw').addEventListener('click',function(){setTab('raw');});
+  $('resultText').addEventListener('input',function(){
+    if(curTab==='fixed')result.fixed=this.value;else result.raw=this.value;
+  });
+
   var busy=false;
   $('goBtn').addEventListener('click',function(){
     if(busy)return;
@@ -426,29 +644,35 @@ window.ADS = {
     }else{
       var f=fileInput.files[0];
       if(!f){setMsg('請選擇要轉錄的音檔。','err');return;}
+      if(fileBlocked){setMsg('這個檔案超過免費試用限制,請見上方提示。','err');return;}
       form.append('file',f,f.name);
     }
-    form.append('correct',$('optCorrect').checked?'true':'false');
+    var wantCorrect=$('optCorrect').checked;
+    form.append('correct',wantCorrect?'true':'false');
+    form.append('timestamps',$('optTs').checked?'true':'false');
+    form.append('remove_fillers',$('optFillers').checked?'true':'false');
+    form.append('speakers',$('optSpeakers').checked?'true':'false');
 
-    setBusy(true);hide('resultCard');
-    setMsg('<span class="spin"></span>處理中……取得音訊與 AI 轉錄可能需 30–90 秒,請稍候。','info');
-    fetch(BACKEND_URL+'/api/trial',{method:'POST',
-      headers:{'ngrok-skip-browser-warning':'1'},body:form})
-      .then(function(res){
-        return res.text().then(function(t){
-          var d;try{d=JSON.parse(t);}catch(err){d={};}
-          if(!res.ok){
-            var msg=d.detail||('伺服器錯誤(HTTP '+res.status+')');
-            throw new Error(msg);
-          }
-          return d;
-        });
-      }).then(function(d){
-        $('resultText').value=d.text||'(沒有辨識到內容)';
-        show('resultCard');setMsg('');
+    setBusy(true);hide('resultCard');setMsg('');
+    var t0=Date.now();
+    progBegin();
+    sendTrial(form,0)
+      .then(function(d){
+        progEnd();
+        result.raw=d.raw_text||d.text||'(沒有辨識到內容)';
+        result.hasFixed=!!d.corrected;
+        result.fixed=result.hasFixed?(d.text||''):result.raw;
+        if(result.hasFixed){show('rtabs');setTab('fixed');}
+        else{hide('rtabs');setTab('raw');}
+        if(wantCorrect&&!d.corrected)setMsg('AI 校正暫時失敗,以下顯示原始轉錄結果。','info');
+        var secs=Math.round((Date.now()-t0)/1000);
+        var chars=($('resultText').value||'').replace(/\s/g,'').length;
+        $('stats').textContent='約 '+chars+' 字 · 耗時 '+fmtDur(secs);
+        show('resultCard');
         if(typeof d.trial_remaining_minutes==='number')showRemain(d.trial_remaining_minutes);
         $('resultCard').scrollIntoView({behavior:'smooth',block:'start'});
       }).catch(function(err){
+        progEnd();
         var m=escapeHtml(err&&err.message||String(err));
         if(/已用完|總量|上限/.test(m)){
           m+=' &nbsp;<a href="v2/" style="color:inherit;text-decoration:underline">登入儲值繼續 →</a>';
@@ -462,15 +686,33 @@ window.ADS = {
     b.disabled=on;b.textContent=on?'處理中…':'免費轉錄';
   }
 
-  /* 結果操作 */
+  /* 結果操作:複製 / Word / txt(檔名帶版本) */
+  function verName(){return (result.hasFixed&&curTab==='fixed')?'校正版':'原始版';}
+  function downloadBlob(blob,name){
+    var a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);a.download=name;
+    a.click();URL.revokeObjectURL(a.href);
+  }
   $('copyBtn').addEventListener('click',function(){
-    var ta=$('resultText');ta.select();
-    try{document.execCommand('copy');this.textContent='已複製 ✓';var self=this;setTimeout(function(){self.textContent='複製';},1500);}catch(e){}
+    var ta=$('resultText'),self=this;
+    function done(){self.textContent='已複製 ✓';setTimeout(function(){self.textContent='複製';},1500);}
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(ta.value).then(done).catch(function(){ta.select();document.execCommand('copy');done();});
+    }else{ta.select();try{document.execCommand('copy');done();}catch(e){}}
+  });
+  $('wordBtn').addEventListener('click',function(){
+    var text=$('resultText').value;
+    var paras=text.split(/\n+/).map(function(l){
+      return '<p style="font-size:12pt;line-height:1.8;margin:0 0 10pt 0;">'+escapeHtml(l)+'</p>';
+    }).join('');
+    var html='<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>逐字稿</title></head>'+
+      '<body style="font-family:標楷體,DFKai-SB,serif;">'+
+      '<h1 style="font-size:16pt;text-align:center;">逐字稿('+verName()+')</h1>'+
+      paras+'</body></html>';
+    downloadBlob(new Blob(['\ufeff',html],{type:'application/msword'}),'逐字稿_'+verName()+'.doc');
   });
   $('dlBtn').addEventListener('click',function(){
-    var blob=new Blob([$('resultText').value],{type:'text/plain;charset=utf-8'});
-    var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-    a.download='transcript.txt';a.click();URL.revokeObjectURL(a.href);
+    downloadBlob(new Blob(['\ufeff',$('resultText').value],{type:'text/plain;charset=utf-8'}),'逐字稿_'+verName()+'.txt');
   });
 
   /* AdSense:載入碼已放在 <head>;這裡依 window.ADS 的版位代碼把兩個版位變成廣告,

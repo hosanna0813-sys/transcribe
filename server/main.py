@@ -593,6 +593,48 @@ def _whisper_transcribe(audio_path: str, api_key: str) -> str:
     return resp.text.strip()
 
 
+def _whisper_transcribe_segments(audio_path: str, api_key: str) -> list:
+    """同 _whisper_transcribe,但取 verbose_json 回傳 segments(供時間軸)"""
+    import httpx
+    with open(audio_path, "rb") as f:
+        files = {"file": ("audio.m4a", f, "audio/mp4")}
+        data = {"model": "whisper-1", "language": "zh", "response_format": "verbose_json"}
+        try:
+            resp = httpx.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files=files, data=data, timeout=600,
+            )
+        except Exception as e:
+            raise HTTPException(502, f"轉錄服務連線失敗:{str(e)[:120]}")
+    if resp.status_code != 200:
+        raise HTTPException(502, f"轉錄失敗:{resp.text[:200]}")
+    return resp.json().get("segments") or []
+
+
+def _segments_to_text(segments: list, offset: float = 0, para_sec: int = 30) -> str:
+    """segments 以約 para_sec 秒為一段組段,段首加 [H:MM:SS](含起點偏移)"""
+    def stamp(sec: float) -> str:
+        s = int(sec)
+        return f"[{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}]"
+
+    paras, buf, para_start = [], [], None
+    for seg in segments:
+        txt = (seg.get("text") or "").strip()
+        if not txt:
+            continue
+        start = float(seg.get("start") or 0)
+        if para_start is None:
+            para_start = start
+        buf.append(txt)
+        if float(seg.get("end") or start) - para_start >= para_sec:
+            paras.append(stamp(para_start + offset) + " " + "".join(buf))
+            buf, para_start = [], None
+    if buf:
+        paras.append(stamp((para_start or 0) + offset) + " " + "".join(buf))
+    return "\n\n".join(paras)
+
+
 # ---- GPT 校正(可選,便宜模型;成本小,MVP 不額外收費)----
 CORRECTION_MODEL = os.environ.get("CORRECTION_MODEL", "gpt-4o-mini")
 DEFAULT_VOCAB = ("輿情, 行政院, 災害防救, 新聞稿, 記者會, 質詢, 陳情, 簽呈, 公文, "
@@ -605,6 +647,23 @@ _CORRECT_SYS = (
     "4. 使用台灣慣用的繁體中文與全形標點。\n"
     "直接輸出校正後全文,不要加任何說明、前言或 Markdown 標記。"
 )
+_CORRECT_RULE_FILLERS = (
+    "另外:刪除「嗯」「啊」「呃」「就是說」「那個」「這個」等無意義的口頭贅詞與填充詞,"
+    "但不得刪除有實際內容的語句。"
+)
+_CORRECT_RULE_SPEAKERS = (
+    "另外:依語意推測講者輪替,在每位講者發言開頭標「甲:」「乙:」(最多兩位);"
+    "無法判斷時不要硬標。"
+)
+
+
+def _correct_sys(remove_fillers: bool = False, speakers: bool = False) -> str:
+    sys = _CORRECT_SYS
+    if remove_fillers:
+        sys += "\n" + _CORRECT_RULE_FILLERS
+    if speakers:
+        sys += "\n" + _CORRECT_RULE_SPEAKERS
+    return sys
 
 
 def _chunk_text(text: str, max_len: int = 6000) -> list:
@@ -620,16 +679,17 @@ def _chunk_text(text: str, max_len: int = 6000) -> list:
     return chunks
 
 
-def _gpt_correct(text: str, api_key: str) -> str:
+def _gpt_correct(text: str, api_key: str, remove_fillers: bool = False, speakers: bool = False) -> str:
     """用 GPT 逐塊校正逐字稿(修錯字/標點,不改內容);失敗由呼叫端決定退回原文"""
     import httpx
     out = []
+    sys_prompt = _correct_sys(remove_fillers, speakers)
     for chunk in _chunk_text(text):
         resp = httpx.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={"model": CORRECTION_MODEL, "temperature": 0,
-                  "messages": [{"role": "system", "content": _CORRECT_SYS},
+                  "messages": [{"role": "system", "content": sys_prompt},
                                {"role": "user", "content": chunk}]},
             timeout=300,
         )
@@ -1376,6 +1436,9 @@ def api_trial(
     start: float | None = Form(None),
     end: float | None = Form(None),
     correct: bool = Form(True),
+    timestamps: bool = Form(False),
+    remove_fillers: bool = Form(False),
+    speakers: bool = Form(False),
 ):
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -1443,13 +1506,21 @@ def api_trial(
         except subprocess.TimeoutExpired:
             raise HTTPException(504, "音訊轉檔逾時")
 
-        text = _whisper_transcribe(m4a, api_key)
-        if correct and text:
+        if timestamps:
+            # YouTube 截取時,時間軸以原片時間為準(加 start 偏移);上傳檔則從 0 起算
+            offset = float(start or 0) if youtube_url else 0.0
+            raw_text = _segments_to_text(_whisper_transcribe_segments(m4a, api_key), offset)
+        else:
+            raw_text = _whisper_transcribe(m4a, api_key)
+        text, corrected = raw_text, False
+        if correct and raw_text:
             try:
-                text = _gpt_correct(text, api_key)
+                text = _gpt_correct(raw_text, api_key, remove_fillers, speakers)
+                corrected = True
             except Exception:
                 pass
-        return {"text": text, "trial_remaining_minutes": _trial_remaining(ip) // 60}
+        return {"text": text, "raw_text": raw_text, "corrected": corrected,
+                "trial_remaining_minutes": _trial_remaining(ip) // 60}
     except HTTPException:
         raise
     except Exception as e:
