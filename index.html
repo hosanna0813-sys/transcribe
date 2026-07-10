@@ -542,7 +542,7 @@ window.ADS = {
   $('markEnd').addEventListener('click',function(){markTime('end');});
 
   function parseTime(str){
-    str=(str||'').replace(/:/g,':').trim();   // 支援全形冒號
+    str=(str||'').replace(/：/g,':').trim();   // 全形冒號正規化
     if(!str)return null;
     var m=str.match(/^(\d+)(?::([0-5]?\d))?(?::([0-5]?\d))?$/);
     if(!m)return NaN;
@@ -550,9 +550,21 @@ window.ADS = {
     return c!==null?a*3600+b*60+c:(b!==null?a*60+b:a);
   }
 
+  /* 匿名裝置 ID:純隨機 UUID(只用於免費額度計量,不蒐集任何裝置特徵) */
+  function deviceId(){
+    try{
+      var id=localStorage.getItem('tw_device');
+      if(!id){
+        id=(crypto.randomUUID&&crypto.randomUUID())||'';
+        if(id)localStorage.setItem('tw_device',id);
+      }
+      return id||'';
+    }catch(e){return '';}
+  }
+
   /* 試用狀態 */
   var trialMin=10;
-  fetch(BACKEND_URL+'/api/trial/status',{headers:{'ngrok-skip-browser-warning':'1'}})
+  fetch(BACKEND_URL+'/api/trial/status?device_id='+encodeURIComponent(deviceId()),{headers:{'ngrok-skip-browser-warning':'1'}})
     .then(function(r){return r.json();})
     .then(function(d){
       if(d.trial_minutes){trialMin=d.trial_minutes;
@@ -678,6 +690,7 @@ window.ADS = {
     form.append('timestamps',$('optTs').checked?'true':'false');
     form.append('remove_fillers',$('optFillers').checked?'true':'false');
     form.append('speakers',$('optSpeakers').checked?'true':'false');
+    var dev=deviceId();if(dev)form.append('device_id',dev);
 
     setBusy(true);setMsg('');   // 不隱藏上一次結果:若這次失敗,舊結果仍可用
     var t0=Date.now();

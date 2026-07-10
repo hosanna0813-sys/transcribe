@@ -449,7 +449,7 @@
 
     /* 解析時間輸入:'90'、'5:30'、'1:05:30'(全形冒號亦可);空回 null */
     function parseTime(str){
-      str=(str||'').replace(/:/g,':').trim();
+      str=(str||'').replace(/：/g,':').trim();   // 全形冒號正規化
       if(!str)return null;
       var m=str.match(/^(\d+)(?::([0-5]?\d))?(?::([0-5]?\d))?$/);
       if(!m)return NaN;

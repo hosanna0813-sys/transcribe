@@ -10,8 +10,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="preconnect" href="https://api.openai.com">
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
-<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5508689053185527"
-     crossorigin="anonymous"></script>
+<!-- 資安:本頁會經手使用者的 OpenAI API Key,刻意不載入 AdSense 或任何
+     非必要第三方 JavaScript,降低金鑰外洩面。廣告只放在首頁等不經手金鑰的頁面。 -->
 <style>
   :root{
     --bg:#F4F6FA; --card:#FFFFFF; --ink:#18213A; --muted:#65718A;
@@ -289,7 +289,7 @@
         <button id="eyeBtn" type="button" aria-label="顯示或隱藏 API Key">顯示</button>
       </div>
       <div class="keymeta">
-        <label class="check inline"><input type="checkbox" id="saveKey"><span>在此裝置記住</span></label>
+        <label class="check inline" title="勾選才會存在這台裝置的瀏覽器;公用電腦請勿勾選"><input type="checkbox" id="saveKey"><span>在此裝置記住(公用電腦勿勾)</span></label>
         <nav class="keylinks">
           <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">申請 Key ↗</a><i>·</i>
           <a href="https://platform.openai.com/settings/organization/billing/overview" target="_blank" rel="noopener">儲值 ↗</a><i>·</i>
@@ -408,10 +408,10 @@
 (function(){
   var DEFAULT_VOCAB='輿情, 行政院, 災害防救, 新聞稿, 記者會, 質詢, 陳情, 簽呈, 公文, 府會聯絡, 局處, 科長, 專門委員, 參事, 主任秘書';
   /* 站長內建的 YouTube 伺服器清單(依優先序,連不上自動換下一台;進階選項可個別覆蓋)
-     首位放家用中繼站(住宅 IP,免驗證),Render 作為備援 */
+     資安:家用中繼網址不放公開前端(它只服務正式後端的簽章請求),
+     這裡只列公開的 Render 服務;有自架伺服器可在進階選項自行填入 */
   var DEFAULT_YT_SERVERS=(window.__DEFAULT_YT_SERVERS instanceof Array)?window.__DEFAULT_YT_SERVERS:[
-    'https://woof-stand-rectify.ngrok-free.dev',   // 家用中繼站(住宅 IP,免驗證)
-    'https://transcribe-yt-j7kv.onrender.com'      // Render 備援
+    'https://transcribe-yt-j7kv.onrender.com'      // 公開服務(有速率限制)
   ];
   var SIZE_LIMIT=25*1024*1024;
   var CHUNK_SEC=600; /* 每段約 10 分鐘(16kHz 單聲道 WAV 約 19 MB) */

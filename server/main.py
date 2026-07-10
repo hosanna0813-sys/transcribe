@@ -9,9 +9,12 @@ OpenAI API Key 走 Whisper 轉錄。
 伺服器不保存任何音訊、不經手任何 API Key。
 """
 
+import hmac
+import ipaddress
 import os
 import re
 import glob
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -66,15 +69,21 @@ def _job_release(key, job: "_AudioJob"):
         shutil.rmtree(job.tmpdir, ignore_errors=True)
 
 
-def client_ip(request: Request) -> str:
-    # 取 XFF「最右值」:那是 Render 代理實際看到的來源,用戶端無法偽造;
-    # 最左值可由請求者任填,取之會被繞過每 IP 限流與試用額度
+def get_trusted_client_ip(request: Request) -> str:
+    """可信來源 IP:只取反向代理(Render)附加的 XFF「最右值」,並以
+    ipaddress 驗證;不合法或缺頭時退回連線層 IP。最左值由用戶端任填,
+    取之會被偽造繞過限流與試用額度。"""
     fwd = request.headers.get("x-forwarded-for", "")
     if fwd:
         last = fwd.split(",")[-1].strip()
-        if last:
-            return last
+        try:
+            return str(ipaddress.ip_address(last))
+        except ValueError:
+            pass  # 不合法的 header 不可當成合法身分,退回連線層
     return request.client.host if request.client else "unknown"
+
+
+client_ip = get_trusted_client_ip  # 既有呼叫端沿用舊名
 
 
 def rate_check(bucket: str, request: Request) -> None:
@@ -111,6 +120,75 @@ app.add_middleware(
 def check_url(url: str) -> None:
     if not YT_URL_RE.match(url or ""):
         raise HTTPException(400, "請提供有效的 YouTube 影片網址")
+
+
+# =============================================================
+# 環境與中繼防護
+#   APP_ENV=production 時:ECPay 不退回測試金鑰、PUBLIC_BASE_URL 必填。
+#   家用中繼(server/home)設 RELAY_REQUIRE_AUTH=1 + RELAY_SHARED_SECRET:
+#   /info /caption /audio /diag 需通過 HMAC 簽章(timestamp±60s、nonce 防重放)。
+#   Render 只設 RELAY_SHARED_SECRET(對外簽章),自身端點維持公開供 byok 使用。
+# =============================================================
+APP_ENV = os.environ.get("APP_ENV", "development").strip().lower()
+IS_PRODUCTION = APP_ENV == "production"
+RELAY_SIG_SKEW_SEC = 60
+_relay_nonces: dict = {}          # nonce -> expiry_ts
+_relay_nonce_lock = threading.Lock()
+
+
+def _relay_secret() -> str:
+    return os.environ.get("RELAY_SHARED_SECRET", "")
+
+
+def _relay_auth_required() -> bool:
+    return os.environ.get("RELAY_REQUIRE_AUTH", "").strip() in ("1", "true", "yes")
+
+
+def _relay_sign(secret: str, ts: str, nonce: str, method: str, path: str, query: dict) -> str:
+    cq = "&".join(f"{k}={query[k]}" for k in sorted(query))
+    msg = f"{ts}\n{nonce}\n{method.upper()}\n{path}\n{cq}"
+    return hmac.new(secret.encode(), msg.encode(), "sha256").hexdigest()
+
+
+def _relay_sign_headers(method: str, path: str, query: dict) -> dict:
+    """對外呼叫家用中繼時附上簽章(未設密鑰則不附,由中繼端決定是否拒絕)"""
+    secret = _relay_secret()
+    if not secret:
+        return {}
+    ts = str(int(time.time()))
+    nonce = secrets.token_hex(16)
+    return {"X-Relay-Timestamp": ts, "X-Relay-Nonce": nonce,
+            "X-Relay-Signature": _relay_sign(secret, ts, nonce, method, path, query)}
+
+
+def relay_guard(request: Request) -> None:
+    """RELAY_REQUIRE_AUTH=1 時強制驗證簽章;失敗一律 403、不洩漏細節"""
+    if not _relay_auth_required():
+        return
+    secret = _relay_secret()
+    if not secret:
+        raise HTTPException(403, "服務未開放")   # fail closed:要求驗證但沒設密鑰
+    ts = request.headers.get("x-relay-timestamp", "")
+    nonce = request.headers.get("x-relay-nonce", "")
+    sig = request.headers.get("x-relay-signature", "")
+    if not (ts and nonce and sig):
+        raise HTTPException(403, "服務未開放")
+    try:
+        if abs(time.time() - int(ts)) > RELAY_SIG_SKEW_SEC:
+            raise ValueError
+    except ValueError:
+        raise HTTPException(403, "服務未開放")
+    query = {k: v for k, v in request.query_params.items()}
+    expect = _relay_sign(secret, ts, nonce, request.method, request.url.path, query)
+    if not hmac.compare_digest(expect, sig):
+        raise HTTPException(403, "服務未開放")
+    now = time.time()
+    with _relay_nonce_lock:
+        for k in [k for k, exp in _relay_nonces.items() if exp < now]:
+            del _relay_nonces[k]
+        if nonce in _relay_nonces:
+            raise HTTPException(403, "服務未開放")   # nonce 重放
+        _relay_nonces[nonce] = now + RELAY_SIG_SKEW_SEC * 2
 
 
 # YouTube 對機房 IP 常要求登入驗證。兩層突破:
@@ -159,22 +237,56 @@ def probe(url: str) -> dict:
     raise HTTPException(502, f"無法讀取影片資訊:{last[:200]}")
 
 
-@app.get("/healthz")
-def healthz():
-    # 一併回報 PO Token 產生器(bgutil,4416 埠)是否運作,方便部署後驗證
-    pot = False
+def _pot_provider_alive() -> bool:
     try:
         import urllib.request
         with urllib.request.urlopen("http://127.0.0.1:4416/ping", timeout=3) as r:
-            pot = r.status == 200
+            return r.status == 200
     except Exception:
-        pot = False
-    return {"ok": True, "pot_provider": pot}
+        return False
+
+
+@app.get("/healthz")
+def healthz():
+    """liveness:只回報 Web 行程存活(依賴狀態請看 /readyz)"""
+    return {"ok": True}
+
+
+@app.get("/readyz")
+def readyz():
+    """readiness:檢查必要依賴,任何必要項故障回 503(不輸出金鑰或內部路徑)"""
+    deps = {
+        "ffmpeg": bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe")),
+        "tmp_writable": False,
+        "pot_provider": _pot_provider_alive(),
+        "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
+        "supabase_configured": bool(os.environ.get("SUPABASE_URL")
+                                    and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")),
+        "relay_auth": (not _relay_auth_required()) or bool(_relay_secret()),
+    }
+    try:
+        with tempfile.NamedTemporaryFile(dir=tempfile.gettempdir()) as f:
+            f.write(b"x")
+        deps["tmp_writable"] = True
+    except Exception:
+        deps["tmp_writable"] = False
+    # 必要依賴:ffmpeg、暫存目錄、(啟用中繼驗證時)密鑰、PO Token 產生器
+    critical = deps["ffmpeg"] and deps["tmp_writable"] and deps["relay_auth"] and deps["pot_provider"]
+    body = {"ok": critical, "env": APP_ENV, "dependencies": deps}
+    if not critical:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 
 @app.get("/diag")
 def diag(request: Request, url: str = Query(...)):
-    """遠端診斷:回傳 yt-dlp 詳細日誌,用於排查 YouTube 驗證問題(與 /info 共用速率額度)"""
+    """遠端診斷:回傳 yt-dlp 詳細日誌。僅供站長排查:須設 DIAG_TOKEN 並帶
+    X-Diag-Token 標頭;未設 DIAG_TOKEN 一律 404(正式環境預設關閉)。"""
+    token = os.environ.get("DIAG_TOKEN", "")
+    given = request.headers.get("x-diag-token", "")
+    if not token or not hmac.compare_digest(token, given):
+        raise HTTPException(404, "Not Found")
     rate_check("info", request)
     check_url(url)
     lines: list = []
@@ -198,11 +310,19 @@ def diag(request: Request, url: str = Query(...)):
     return {"ok": False, "log_tail": [l[:300] for l in lines[-90:]]}
 
 
+def _reject_live(meta: dict) -> None:
+    """直播/即將直播/無限串流不支援(未知長度不可當 0 秒放行)"""
+    if meta.get("is_live") or meta.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+        raise HTTPException(400, "直播影片不支援轉錄,請等影片結束轉為一般影片後再試")
+
+
 @app.get("/info")
 def info(request: Request, url: str = Query(...)):
+    relay_guard(request)
     rate_check("info", request)
     check_url(url)
     d = probe(url)
+    _reject_live(d)
     duration = int(d.get("duration") or 0)
     return {
         "title": d.get("title") or "YouTube 影片",
@@ -242,6 +362,7 @@ def _vtt_to_text(path: str) -> str:
 
 @app.get("/caption")
 def caption(request: Request, url: str = Query(...), lang: str = Query(...)):
+    relay_guard(request)
     rate_check("info", request)  # 輕量文字下載,沿用 info 額度
     check_url(url)
     tmpdir = tempfile.mkdtemp(prefix="ytcap-")
@@ -273,13 +394,18 @@ def audio(
     start: float | None = Query(None, ge=0),
     end: float | None = Query(None, gt=0),
 ):
+    relay_guard(request)
     rate_check("audio", request)
     check_url(url)
     if start is not None and end is not None and end <= start:
         raise HTTPException(400, "終點必須大於起點")
 
     meta = probe(url)
+    _reject_live(meta)
     duration = int(meta.get("duration") or 0)
+    if duration <= 0 and end is None:
+        # 未知長度不可視為 0 秒放行:必須指定明確截取範圍
+        raise HTTPException(400, "無法取得影片長度,請指定明確的起訖時間再試")
     clip_len = (end if end is not None else duration or MAX_VIDEO_SEC) - (start or 0)
     if start is None and end is None:
         if duration > MAX_VIDEO_SEC:
@@ -433,6 +559,7 @@ from pydantic import BaseModel
 
 MAX_CLIP_UPLOAD_SEC = 10 * 60          # 階段二短音檔上限 10 分鐘
 WHISPER_USD_PER_MIN = 0.006            # Whisper 定價(供成本估算/監控)
+ALLOWED_JWT_ALGORITHMS = ("ES256",)   # Supabase 簽發演算法,白名單固定
 _jwks_cache: dict = {"keys": None, "at": 0.0}
 _jwks_lock = threading.Lock()
 
@@ -481,7 +608,10 @@ def _verify_jwt(authorization: str | None) -> str:
     except Exception:
         raise HTTPException(401, "登入憑證無效")
     kid = header.get("kid")
-    alg = header.get("alg", "ES256")
+    alg = header.get("alg")
+    # 演算法白名單固定由伺服器決定,不接受 token header 自報(防 alg=none/降級)
+    if alg not in ALLOWED_JWT_ALGORITHMS:
+        raise HTTPException(401, "登入憑證無效")
     keys = _get_jwks(supabase_url)
     jwk = next((k for k in keys if k.get("kid") == kid), None)
     if jwk is None:
@@ -493,9 +623,15 @@ def _verify_jwt(authorization: str | None) -> str:
         raise HTTPException(401, "登入憑證無效(找不到對應金鑰)")
     try:
         key = algorithms.get_default_algorithms()[alg].from_jwk(json.dumps(jwk))
-        claims = pyjwt.decode(token, key=key, algorithms=[alg], audience="authenticated")
-    except Exception as e:
-        raise HTTPException(401, f"登入已過期或無效:{str(e)[:100]}")
+        claims = pyjwt.decode(
+            token, key=key,
+            algorithms=list(ALLOWED_JWT_ALGORITHMS),
+            audience="authenticated",
+            issuer=f"{supabase_url}/auth/v1",
+            options={"require": ["exp", "sub", "aud", "iss"]},
+        )
+    except Exception:
+        raise HTTPException(401, "登入已過期或無效,請重新登入")
     uid = claims.get("sub")
     if not uid:
         raise HTTPException(401, "登入憑證缺少使用者資訊")
@@ -783,6 +919,7 @@ def api_transcribe(
     api_key, supabase_url, service_key = _paid_env()
     if not (api_key and supabase_url and service_key):
         raise HTTPException(503, "付費轉錄尚未啟用(伺服器未設定金鑰)")
+    _content_length_precheck(request)
     rate_check("audio", request)
     uid = _verify_jwt(authorization)
 
@@ -921,20 +1058,55 @@ def _fmt_hms(sec: int) -> str:
     return f"[{h:02d}:{m:02d}:{s:02d}]"
 
 
+def _relay_download_caps():
+    try:
+        max_bytes = int(os.environ.get("MAX_RELAY_DOWNLOAD_BYTES", str(512 * 1024 * 1024)))
+    except ValueError:
+        max_bytes = 512 * 1024 * 1024
+    try:
+        max_sec = int(os.environ.get("MAX_RELAY_DOWNLOAD_SECONDS", "1800"))
+    except ValueError:
+        max_sec = 1800
+    return max_bytes, max_sec
+
+
 def _relay_fetch_audio(url: str, start, end, dest: str) -> None:
-    """向家用中繼 /audio 取回(已截取、已轉檔的)m4a,住宅 IP 負責下載"""
+    """向家用中繼 /audio 取回(已截取、已轉檔的)m4a,住宅 IP 負責下載。
+    對外附 HMAC 簽章(中繼端驗證);分塊下載並限制總大小與總時間。"""
     relay = (os.environ.get("HOME_RELAY_URL") or "").rstrip("/")
     if not relay:
         raise HTTPException(503, "YouTube 來源尚未啟用(伺服器未設定家用中繼網址)")
-    q = "/audio?url=" + urllib.parse.quote(url, safe="")
+    query = {"url": url}
     if start is not None:
-        q += f"&start={start}"
+        query["start"] = str(start)
     if end is not None:
-        q += f"&end={end}"
-    req = urllib.request.Request(relay + q, headers={"ngrok-skip-browser-warning": "1"})
+        query["end"] = str(end)
+    q = "/audio?" + "&".join(f"{k}={urllib.parse.quote(v, safe='')}" for k, v in query.items())
+    # 簽章用「未編碼值」的正規化字串,中繼端以 query_params(已解碼)重算
+    headers = {"ngrok-skip-browser-warning": "1"}
+    headers.update(_relay_sign_headers("GET", "/audio", query))
+    req = urllib.request.Request(relay + q, headers=headers)
+    max_bytes, max_sec = _relay_download_caps()
+    deadline = time.time() + max_sec
+    got = 0
     try:
         with urllib.request.urlopen(req, timeout=1800) as r, open(dest, "wb") as f:
-            shutil.copyfileobj(r, f)
+            while True:
+                if time.time() > deadline:
+                    raise HTTPException(504, "YouTube 下載逾時,請改截取較短片段")
+                chunk = r.read(1024 * 256)
+                if not chunk:
+                    break
+                got += len(chunk)
+                if got > max_bytes:
+                    raise HTTPException(413, "下載內容超過大小上限,請改截取較短片段")
+                f.write(chunk)
+    except HTTPException:
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
+        raise
     except urllib.error.HTTPError as e:
         detail = (e.read() or b"").decode(errors="ignore")[:200]
         raise HTTPException(502, f"YouTube 下載失敗:{detail}")
@@ -1040,6 +1212,7 @@ def api_create_job(
     api_key, supabase_url, service_key = _paid_env()
     if not (api_key and supabase_url and service_key):
         raise HTTPException(503, "付費轉錄尚未啟用(伺服器未設定金鑰)")
+    _content_length_precheck(request)
     rate_check("audio", request)
     uid = _verify_jwt(authorization)
     _user_rate_check(uid)
@@ -1256,10 +1429,15 @@ PAY_PACKAGES = [
 
 
 def _ecpay_conf():
-    mid = os.environ.get("ECPAY_MERCHANT_ID") or _ECPAY_TEST["mid"]
-    key = os.environ.get("ECPAY_HASH_KEY") or _ECPAY_TEST["key"]
-    iv = os.environ.get("ECPAY_HASH_IV") or _ECPAY_TEST["iv"]
+    mid = os.environ.get("ECPAY_MERCHANT_ID", "")
+    key = os.environ.get("ECPAY_HASH_KEY", "")
+    iv = os.environ.get("ECPAY_HASH_IV", "")
     env = os.environ.get("ECPAY_ENV", "stage")
+    if not (mid and key and iv):
+        if IS_PRODUCTION:
+            # 正式環境缺正式金鑰:金流 fail closed,絕不退回公開測試金鑰
+            raise HTTPException(503, "金流尚未設定完成,暫停儲值")
+        mid, key, iv = _ECPAY_TEST["mid"], _ECPAY_TEST["key"], _ECPAY_TEST["iv"]
     return mid, key, iv, ("production" if env == "production" else "stage")
 
 
@@ -1296,7 +1474,7 @@ def _sb_payment_by_mtn(mtn: str):
     """以 MerchantTradeNo 找付款(回傳 dict 或 None)"""
     _, supabase_url, service_key = _paid_env()
     url = (f"{supabase_url}/rest/v1/payments?merchant_trade_no=eq."
-           f"{urllib.parse.quote(mtn, safe='')}&select=id,status,credits_added")
+           f"{urllib.parse.quote(mtn, safe='')}&select=id,status,credits_added,amount,provider")
     req = urllib.request.Request(url, headers={
         "apikey": service_key, "Authorization": f"Bearer {service_key}"})
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -1327,7 +1505,13 @@ def api_pay_create(request: Request, package_id: str = Form(...),
            + "".join(random.choice("0123456789abcdef") for _ in range(4)))[:20]
     payment_id = _sb_insert_payment(uid, pkg["amount_twd"], credits, mtn)
 
-    base = (os.environ.get("PUBLIC_BASE_URL") or str(request.base_url)).rstrip("/")
+    public_base = os.environ.get("PUBLIC_BASE_URL", "").strip()
+    if not public_base:
+        if IS_PRODUCTION:
+            # 正式環境不可用使用者可控的 Host header 產生付款回呼網址
+            raise HTTPException(503, "金流尚未設定完成(缺 PUBLIC_BASE_URL),暫停儲值")
+        public_base = str(request.base_url)
+    base = public_base.rstrip("/")
     params = {
         "MerchantID": mid,
         "MerchantTradeNo": mtn,
@@ -1350,16 +1534,30 @@ async def api_pay_callback(request: Request):
     """綠界伺服器對伺服器付款結果通知;驗章成功且付款成功才入帳,回應 1|OK"""
     form = await request.form()
     data = {k: str(v) for k, v in form.items()}
+    mid, _, _, _ = _ecpay_conf()
     mac = data.get("CheckMacValue", "")
-    if not mac or _ecpay_checkmac(data) != mac.upper():
+    if not mac or not hmac.compare_digest(_ecpay_checkmac(data), mac.upper()):
         return PlainTextResponse("0|CheckMacValue error", status_code=400)
+    if data.get("MerchantID") != mid:
+        return PlainTextResponse("0|MerchantID error", status_code=400)
     if data.get("RtnCode") != "1":
         return PlainTextResponse("1|OK")   # 收到但非成功,不入帳
     mtn = data.get("MerchantTradeNo", "")
     pay = _sb_payment_by_mtn(mtn)
     if not pay:
         return PlainTextResponse("0|order not found", status_code=400)
+    if (pay.get("provider") or "ecpay") != "ecpay":
+        return PlainTextResponse("0|provider error", status_code=400)
+    if pay.get("status") not in ("pending", "paid"):
+        return PlainTextResponse("0|order state error", status_code=400)
+    # 回傳金額必須與本地訂單完全一致,防以小額回呼冒領大額方案
     try:
+        if int(float(data.get("TradeAmt", "-1"))) != int(float(pay.get("amount") or -2)):
+            return PlainTextResponse("0|amount mismatch", status_code=400)
+    except (TypeError, ValueError):
+        return PlainTextResponse("0|amount mismatch", status_code=400)
+    try:
+        # credit_payment 為原子 RPC:已入帳的訂單重送回 duplicate、不重複加值(冪等)
         _sb_rpc("credit_payment", {
             "p_payment_id": pay["id"],
             "p_provider_txn": data.get("TradeNo") or mtn,
@@ -1404,49 +1602,86 @@ def _trial_today():
     return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
 
 
-def _trial_remaining(ip: str) -> int:
-    per_ip, _ = _trial_limits()
-    today = _trial_today()
-    with _trial_lock:
-        rec = _trial_ip.get(ip)
-        used = rec["sec"] if rec and rec.get("date") == today else 0
-    return max(0, per_ip - used)
+def _trial_used(key: str, today: str) -> int:
+    rec = _trial_ip.get(key)
+    return rec["sec"] if rec and rec.get("date") == today else 0
 
 
-def _trial_reserve(ip: str, cost: int):
-    """檢查每 IP 與全站每日剩餘;足夠則記入用量。不足回傳 (False, 原因)"""
-    per_ip, total = _trial_limits()
+def _trial_remaining(keys) -> int:
+    """今日剩餘秒數:取所有計量鍵(IP、裝置)中最小的剩餘"""
+    if isinstance(keys, str):
+        keys = [keys]
+    per_key, _ = _trial_limits()
     today = _trial_today()
     with _trial_lock:
-        rec = _trial_ip.get(ip)
-        ip_used = rec["sec"] if rec and rec.get("date") == today else 0
+        used = max((_trial_used(k, today) for k in keys), default=0)
+    return max(0, per_key - used)
+
+
+def _trial_reserve(keys, cost: int):
+    """檢查每鍵(IP/裝置)與全站每日剩餘;足夠則對所有鍵記入用量。
+    不足回傳 (False, 原因)。狀態存於行程記憶體(重啟即歸零)——持久化到
+    資料庫列為既定 TODO,現階段以雙鍵+全站上限+Render 單實例控管風險。"""
+    if isinstance(keys, str):
+        keys = [keys]
+    per_key, total = _trial_limits()
+    today = _trial_today()
+    with _trial_lock:
         if _trial_global.get("date") != today:
             _trial_global["date"] = today
             _trial_global["sec"] = 0
-            # 換日順手清掉舊 IP 記錄,避免 dict 無限成長
-            stale = [k for k, v in _trial_ip.items() if v.get("date") != today]
-            for k in stale:
+            # 換日順手清掉舊記錄,避免 dict 無限成長
+            for k in [k for k, v in _trial_ip.items() if v.get("date") != today]:
                 del _trial_ip[k]
-        if ip_used + cost > per_ip:
-            return False, "ip"
+        for k in keys:
+            if _trial_used(k, today) + cost > per_key:
+                return False, "ip"
         if total > 0 and _trial_global["sec"] + cost > total:
             return False, "global"
-        _trial_ip[ip] = {"date": today, "sec": ip_used + cost}
+        for k in keys:
+            _trial_ip[k] = {"date": today, "sec": _trial_used(k, today) + cost}
         _trial_global["sec"] += cost
     return True, None
 
 
-def _trial_refund(ip: str, sec: int) -> None:
+def _trial_refund(keys, sec: int) -> None:
     """轉錄失敗時退回已扣的試用秒數(不低於 0)"""
     if sec <= 0:
         return
+    if isinstance(keys, str):
+        keys = [keys]
     today = _trial_today()
     with _trial_lock:
-        rec = _trial_ip.get(ip)
-        if rec and rec.get("date") == today:
-            rec["sec"] = max(0, rec["sec"] - sec)
+        for k in keys:
+            rec = _trial_ip.get(k)
+            if rec and rec.get("date") == today:
+                rec["sec"] = max(0, rec["sec"] - sec)
         if _trial_global.get("date") == today:
             _trial_global["sec"] = max(0, _trial_global["sec"] - sec)
+
+
+_DEVICE_ID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                           r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _trial_keys(ip: str, device_id: str | None) -> list:
+    """試用額度的計量鍵:IP 一定算;裝置 ID(前端隨機 UUID)合法才多算一鍵。
+    不合法的裝置 ID 不可當成身分(等同未提供)。"""
+    keys = [ip]
+    if device_id and _DEVICE_ID_RE.match(device_id):
+        keys.append("dev:" + device_id.lower())
+    return keys
+
+
+def _content_length_precheck(request: Request) -> None:
+    """在讀取 multipart 前先看 Content-Length,超限直接 413(仍以串流累計為準)"""
+    cl = request.headers.get("content-length")
+    if cl:
+        try:
+            if int(cl) > MAX_FILE_BYTES + 1024 * 1024:   # multipart 邊界的緩衝
+                raise HTTPException(413, "檔案超過 100 MB 上限")
+        except ValueError:
+            pass
 
 
 @app.post("/api/trial")
@@ -1460,12 +1695,14 @@ def api_trial(
     timestamps: bool = Form(False),
     remove_fillers: bool = Form(False),
     speakers: bool = Form(False),
+    device_id: str | None = Form(None),
 ):
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise HTTPException(503, "免費試用暫時未啟用")
+    _content_length_precheck(request)
     rate_check("audio", request)
-    ip = client_ip(request)
+    ip = _trial_keys(client_ip(request), device_id)
     per_ip, _ = _trial_limits()
     remain = _trial_remaining(ip)
     if remain <= 0:
@@ -1562,8 +1799,9 @@ def api_trial(
 
 
 @app.get("/api/trial/status")
-def api_trial_status(request: Request):
+def api_trial_status(request: Request, device_id: str | None = Query(None)):
     per_ip, _ = _trial_limits()
     enabled = bool(os.environ.get("OPENAI_API_KEY"))
+    keys = _trial_keys(client_ip(request), device_id)
     return {"enabled": enabled, "trial_minutes": per_ip // 60,
-            "remaining_minutes": _trial_remaining(client_ip(request)) // 60}
+            "remaining_minutes": _trial_remaining(keys) // 60}

@@ -20,8 +20,14 @@ RUN git clone --single-branch --branch 1.3.1 --depth 1 \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY main.py .
+COPY main.py start.sh ./
+RUN chmod +x start.sh
+
+# 以非 root 使用者執行(暫存寫入系統 /tmp,不需額外權限)
+RUN useradd --create-home --uid 10001 app \
+    && chown -R app:app /opt/bgutil
+USER app
 
 ENV PORT=10000
-# 先啟動 PO Token 產生器(4416 埠,yt-dlp 外掛自動連線),再啟動 API
-CMD ["sh", "-c", "node /opt/bgutil/server/build/main.js & exec uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+# start.sh:啟動並監管 PO Token 產生器(死亡自動重啟),再 exec uvicorn
+CMD ["./start.sh"]

@@ -160,6 +160,15 @@ update public.profiles set role = 'admin', updated_at = now()
 SQL Editor → 貼上 `v2/schema_phase3.sql` 整份 → **Run**。
 (新增逐字稿暫存欄位、擴充結算函式、新增取結果函式。)
 
+### B-0. 保護家用中繼(強烈建議,一次設定)
+家用中繼的 ngrok 網址一旦外流,任何人都能用你家頻寬抓片。已內建 HMAC 簽章驗證:
+1. 產生一串長隨機密鑰(電腦上執行 `openssl rand -hex 32`,或隨便打 40+ 個亂字元)。
+2. 家用機:`server/home/.env` 填 `RELAY_SHARED_SECRET=該密鑰`,重新 `docker compose up -d --build`。
+   之後**未帶有效簽章的請求一律 403**(包含直接打 ngrok 網址的人)。
+3. Render:**Environment** 加同一個 `RELAY_SHARED_SECRET=該密鑰`(後端對中繼的請求會自動簽章)。
+4. 驗收:瀏覽器直接開 `https://你的ngrok網域/info?url=...` 應得到 403;
+   但網站的 YouTube 轉錄照常可用。
+
 ### B. Render 新增一個環境變數
 到 Render 服務 → **Environment** → 新增:
 | 變數名 | 值 |
@@ -347,3 +356,21 @@ window.ADS = {
 > 想讓提醒消失,兩種正解:(1) 之後改綁**自訂網域**;(2) 另外建一個名為
 > `hosanna0813-sys.github.io` 的 repo(使用者頁),把 `ads.txt` 放它根目錄,即成為
 > `hosanna0813-sys.github.io/ads.txt`。可日後再處理。
+
+---
+
+# 正式上線環境(APP_ENV)與安全設定總表
+
+Render → **Environment** 建議在正式收費前設定:
+| 變數 | 說明 |
+| --- | --- |
+| `APP_ENV` | 設 `production`:金流缺正式金鑰時**直接停用儲值**(絕不用測試金鑰)、`PUBLIC_BASE_URL` 必填。未設=development |
+| `RELAY_SHARED_SECRET` | 與家用機相同的中繼簽章密鑰(見上方 B-0) |
+| `DIAG_TOKEN` | 不設 → `/diag` 一律 404(建議平時不設;要排查時暫時設一串亂碼,用 `X-Diag-Token` 標頭存取) |
+
+健康檢查:`/healthz` 只代表 Web 行程存活;**`/readyz`** 檢查 ffmpeg、暫存目錄、
+PO Token 產生器、金鑰設定,必要依賴故障回 503。部署後可開 `/readyz` 確認全綠。
+
+免費試用防濫用現況:可信 IP(不受偽造 X-Forwarded-For 影響)+ 匿名裝置 ID(隨機
+UUID)雙鍵計量 + 全站每日總量;失敗自動退還。⚠️ 計量目前存於伺服器記憶體,
+**重啟會歸零**(Render 免費方案單實例,風險可控);持久化到資料庫列為下一階段工作。
