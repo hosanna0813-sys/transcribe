@@ -1168,9 +1168,25 @@ def _process_job(job_id, uid, jobrow, api_key):
         _job_set(job_id, status="processing", stage="準備中", progress=0)
         src = os.path.join(tmpdir, "src")
         if jobrow.get("source_type") == "youtube":
-            _job_set(job_id, stage="取得音訊中", progress=0)
-            _relay_fetch_audio(jobrow.get("youtube_url"),
-                               jobrow.get("start_seconds"), jobrow.get("end_seconds"), src)
+            # 取音訊(家用中繼下載+截取)是長時間、無回報的階段:用「依片段長度估算」的
+            # 進度條讓使用者看到在動(取音訊占 0–38%;之後轉錄是真實進度 40–95%)。
+            _job_set(job_id, stage="取得音訊中", progress=1)
+            clip = int(jobrow.get("duration_seconds") or 600)
+            est = max(20.0, min(clip * 0.5, 1500.0))   # 估計取音訊所需秒數(隨截取長度)
+            fetch_done = threading.Event()
+
+            def fetch_ticker():
+                t0 = time.time()
+                while not fetch_done.wait(2):
+                    frac = min(0.97, (time.time() - t0) / est)
+                    _job_set(job_id, stage="取得音訊中", progress=max(1, int(frac * 38)))
+            ftick = threading.Thread(target=fetch_ticker, daemon=True)
+            ftick.start()
+            try:
+                _relay_fetch_audio(jobrow.get("youtube_url"),
+                                   jobrow.get("start_seconds"), jobrow.get("end_seconds"), src)
+            finally:
+                fetch_done.set()
         else:
             if not upload_path or not os.path.exists(upload_path):
                 # 上傳檔已失效(通常是重啟後暫存遺失)→ 不可重試,直接失敗退款
@@ -1186,7 +1202,7 @@ def _process_job(job_id, uid, jobrow, api_key):
         ck()
 
         duration = jobrow.get("duration_seconds") or _ffprobe_seconds(src)
-        _job_set(job_id, stage="轉檔切段中", progress=0)
+        _job_set(job_id, stage="轉檔切段中", progress=40)
         segs = _transcode_and_segment(src, tmpdir)
         n = len(segs)
         if n == 0:
@@ -1200,9 +1216,10 @@ def _process_job(job_id, uid, jobrow, api_key):
             texts[i] = _whisper_transcribe(segs[i], api_key)
             with prog_lock:
                 done[0] += 1
-                _job_set(job_id, stage="轉錄中", progress=int(done[0] * 100 / n))
+                # 轉錄是真實進度,配置在 40–95% 這個帶區
+                _job_set(job_id, stage="轉錄中", progress=40 + int(done[0] * 55 / n))
 
-        _job_set(job_id, stage="轉錄中", progress=0)
+        _job_set(job_id, stage="轉錄中", progress=40)
         errs = []
         with ThreadPoolExecutor(max_workers=CHUNK_WORKERS) as ex:
             futs = [ex.submit(work, i) for i in range(n)]
@@ -1222,7 +1239,7 @@ def _process_job(job_id, uid, jobrow, api_key):
 
         cu = None
         if jobrow.get("correction_requested") and full:
-            _job_set(job_id, stage="校正中", progress=100)
+            _job_set(job_id, stage="校正中", progress=97)
             cu = {}
             try:
                 full = _gpt_correct(full, api_key, usage=cu)
