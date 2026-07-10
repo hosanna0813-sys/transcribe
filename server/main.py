@@ -67,9 +67,13 @@ def _job_release(key, job: "_AudioJob"):
 
 
 def client_ip(request: Request) -> str:
+    # 取 XFF「最右值」:那是 Render 代理實際看到的來源,用戶端無法偽造;
+    # 最左值可由請求者任填,取之會被繞過每 IP 限流與試用額度
     fwd = request.headers.get("x-forwarded-for", "")
     if fwd:
-        return fwd.split(",")[0].strip()
+        last = fwd.split(",")[-1].strip()
+        if last:
+            return last
     return request.client.host if request.client else "unknown"
 
 
@@ -613,10 +617,9 @@ def _whisper_transcribe_segments(audio_path: str, api_key: str) -> list:
 
 
 def _segments_to_text(segments: list, offset: float = 0, para_sec: int = 30) -> str:
-    """segments 以約 para_sec 秒為一段組段,段首加 [H:MM:SS](含起點偏移)"""
+    """segments 以約 para_sec 秒為一段組段,段首加時間戳(格式同付費版 _fmt_hms)"""
     def stamp(sec: float) -> str:
-        s = int(sec)
-        return f"[{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}]"
+        return _fmt_hms(int(sec))
 
     paras, buf, para_start = [], [], None
     for seg in segments:
@@ -648,12 +651,12 @@ _CORRECT_SYS = (
     "直接輸出校正後全文,不要加任何說明、前言或 Markdown 標記。"
 )
 _CORRECT_RULE_FILLERS = (
-    "另外:刪除「嗯」「啊」「呃」「就是說」「那個」「這個」等無意義的口頭贅詞與填充詞,"
-    "但不得刪除有實際內容的語句。"
+    "5.(此為規則 1 的例外)刪除「嗯」「啊」「呃」「就是說」「那個」「這個」等"
+    "無意義的口頭贅詞與填充詞;除贅詞外仍不得刪除任何有實際內容的語句。"
 )
 _CORRECT_RULE_SPEAKERS = (
-    "另外:依語意推測講者輪替,在每位講者發言開頭標「甲:」「乙:」(最多兩位);"
-    "無法判斷時不要硬標。"
+    "6.(此為規則 1 的例外)依語意推測講者輪替,在每位講者發言開頭加上「甲:」「乙:」"
+    "標記(最多兩位);除此標記外仍不得增加任何內容,無法判斷時不要硬標。"
 )
 
 
@@ -1382,6 +1385,7 @@ def api_pay_return():
 _trial_ip: dict = {}                       # ip -> {"date": date, "sec": used}
 _trial_global = {"date": None, "sec": 0}
 _trial_lock = threading.Lock()
+_trial_slots = threading.Semaphore(1)      # 試用獨立併發槽,不搶付費的 _audio_slots
 
 
 def _trial_limits():
@@ -1419,6 +1423,10 @@ def _trial_reserve(ip: str, cost: int):
         if _trial_global.get("date") != today:
             _trial_global["date"] = today
             _trial_global["sec"] = 0
+            # 換日順手清掉舊 IP 記錄,避免 dict 無限成長
+            stale = [k for k, v in _trial_ip.items() if v.get("date") != today]
+            for k in stale:
+                del _trial_ip[k]
         if ip_used + cost > per_ip:
             return False, "ip"
         if total > 0 and _trial_global["sec"] + cost > total:
@@ -1426,6 +1434,19 @@ def _trial_reserve(ip: str, cost: int):
         _trial_ip[ip] = {"date": today, "sec": ip_used + cost}
         _trial_global["sec"] += cost
     return True, None
+
+
+def _trial_refund(ip: str, sec: int) -> None:
+    """轉錄失敗時退回已扣的試用秒數(不低於 0)"""
+    if sec <= 0:
+        return
+    today = _trial_today()
+    with _trial_lock:
+        rec = _trial_ip.get(ip)
+        if rec and rec.get("date") == today:
+            rec["sec"] = max(0, rec["sec"] - sec)
+        if _trial_global.get("date") == today:
+            _trial_global["sec"] = max(0, _trial_global["sec"] - sec)
 
 
 @app.post("/api/trial")
@@ -1446,21 +1467,25 @@ def api_trial(
     rate_check("audio", request)
     ip = client_ip(request)
     per_ip, _ = _trial_limits()
-    if _trial_remaining(ip) <= 0:
+    remain = _trial_remaining(ip)
+    if remain <= 0:
         raise HTTPException(429, f"今日免費試用({per_ip // 60} 分鐘)已用完,登入儲值即可繼續使用")
 
-    if not _audio_slots.acquire(blocking=False):
-        raise HTTPException(429, "伺服器忙碌中,請稍候一分鐘再試")
+    # 試用用獨立併發槽(最多 1),不佔用付費轉錄共用的 _audio_slots
+    if not _trial_slots.acquire(blocking=False):
+        raise HTTPException(429, "免費試用忙碌中,請稍候一分鐘再試")
     tmpdir = tempfile.mkdtemp(prefix="ytpaid-")
     src = os.path.join(tmpdir, "src")
     reserved = 0
     try:
         if youtube_url:
             check_url(youtube_url)
-            # 試用只截取 per_ip 分鐘窗:未給或給太長的終點,一律夾到 起點+per_ip,
-            # 避免家用中繼把整支長片抓回來再被擋
+            # 試用只截取「今日剩餘額度」窗:未給或給太長的終點,夾到 起點+剩餘,
+            # 避免家用中繼抓回註定會被拒的長片段
             s = start if (start and start > 0) else 0
-            cap_end = s + per_ip
+            if end is not None and end <= s:
+                raise HTTPException(400, "終點必須大於起點")
+            cap_end = s + remain
             if end is None or end > cap_end:
                 end = cap_end
             start = s
@@ -1486,6 +1511,8 @@ def api_trial(
             raise HTTPException(400, "音檔長度為 0 或無法辨識")
         if duration > per_ip:
             raise HTTPException(400, f"免費試用僅限 {per_ip // 60} 分鐘內,請截取較短片段或登入使用")
+        if duration > remain:
+            raise HTTPException(429, f"今日剩餘免費額度約 {remain // 60} 分鐘,不足以轉錄這段音訊({int(duration) // 60 + 1} 分鐘內),請截短或登入儲值使用")
 
         ok, why = _trial_reserve(ip, int(math.ceil(duration)))
         if not ok:
@@ -1519,14 +1546,18 @@ def api_trial(
                 corrected = True
             except Exception:
                 pass
-        return {"text": text, "raw_text": raw_text, "corrected": corrected,
+        resp = {"text": text, "raw_text": raw_text, "corrected": corrected,
                 "trial_remaining_minutes": _trial_remaining(ip) // 60}
+        reserved = 0   # 成功,額度確定消耗;失敗路徑由 finally 退還
+        return resp
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(502, f"轉錄失敗:{str(e)[:200]}")
     finally:
-        _audio_slots.release()
+        if reserved:
+            _trial_refund(ip, reserved)
+        _trial_slots.release()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

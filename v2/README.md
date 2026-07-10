@@ -26,6 +26,13 @@
 3.(建議)到 **Authentication → URL Configuration**,把 **Site URL** 設成你的
    `.../v2/` 網址,並在 **Redirect URLs** 加入同一個網址,登入連結才會正確導回。
 
+> ⚠️ **網站改到根網域後必做**:登入導回網址是「當下開啟的頁面」,所以 Supabase 的
+> **Redirect URLs** 必須把新網址也加進去,否則從新網址登入會導錯或失敗。
+> 到 **Authentication → URL Configuration → Redirect URLs** 新增:
+> `https://hosanna0813-sys.github.io/v2/`
+> (保留原本的 `.../transcribe/v2/`,兩個網址都能登入。)也建議把 **Site URL**
+> 改成 `https://hosanna0813-sys.github.io/v2/`。
+
 ### 3. 建立資料表與安全規則
 1. 到左側 **SQL Editor → New query**。
 2. 把本資料夾的 `schema.sql` 整份貼上,按 **Run**。
@@ -284,7 +291,9 @@ AdSense 只驗證**網域根目錄**,所以另外建立了使用者頁 repo **`h
 - 舊網址 `…/transcribe/…` 照常可用(頁面已加 `<link rel="canonical">` 指向新網址,
   告訴 Google 正式版在根網域)。
 - (選用)Render 的 `SITE_V2_URL` 可改成 `https://hosanna0813-sys.github.io/v2/`,
-  讓綠界付款導回直接到新網址、少一次跳轉。
+  讓綠界付款導回直接到新網址、少一次跳轉;不改也能用(同網域,登入狀態共通)。
+- **必做**:Supabase **Redirect URLs** 要加入 `https://hosanna0813-sys.github.io/v2/`
+  (見上方「啟用 Email 登入」的警告框),否則從新網址登入會導錯。
 
 ### A. 免費試用的用量與防濫用(Render 環境變數)
 試用花的是**你的** OpenAI 金鑰,所以用兩層每日上限保護荷包。到 Render → **Environment** 新增:
