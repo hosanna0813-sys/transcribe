@@ -4,6 +4,10 @@ services:
   transcribe:
     build: ..                # 使用 server/ 的 Dockerfile(與 Render 相同)
     restart: unless-stopped  # 電腦重開後自動復活
+    environment:
+      # 家用中繼強制驗證:未帶有效 HMAC 簽章的請求一律 403(防止 ngrok 網址外流被盜用)
+      RELAY_REQUIRE_AUTH: "1"
+      RELAY_SHARED_SECRET: ${RELAY_SHARED_SECRET}
     # 刻意不開放任何主機埠:只有下面的 ngrok 容器透過內部網路連得到它
 
   ngrok:

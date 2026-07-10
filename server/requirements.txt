@@ -1,9 +1,11 @@
-fastapi>=0.115
-uvicorn>=0.30
+# 正式部署用精確版本(可重現建置);升級時改版本號並跑 tests/ 後再部署。
+fastapi==0.139.0
+uvicorn==0.51.0
+httpx==0.28.1
+PyJWT[crypto]==2.13.0
+python-multipart==0.0.32
+# yt-dlp 例外:必須跟上 YouTube 端變動,鎖死舊版反而會壞;
+# 以「下限 + 定期驗證」管理,升級風險由 CI 語法/測試把關
 yt-dlp>=2026.7.4
 yt-dlp-ejs>=0.8.0
 bgutil-ytdlp-pot-provider==1.3.1
-# 計費版 v2 階段二:付費轉錄後端(JWT 驗證、Supabase RPC、OpenAI 呼叫、檔案上傳)
-httpx>=0.27
-PyJWT[crypto]>=2.8
-python-multipart>=0.0.9

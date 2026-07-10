@@ -44,3 +44,19 @@ services:
         sync: false
       - key: SITE_V2_URL          # 前端 v2 網址,例:https://hosanna0813-sys.github.io/transcribe/v2/
         sync: false
+      # 環境:production 時金流缺正式金鑰會直接停用(不退回測試金鑰)、
+      # PUBLIC_BASE_URL 必填;正式上線請設 production
+      - key: APP_ENV
+        sync: false
+      # 家用中繼共享密鑰:與家用機 .env 的 RELAY_SHARED_SECRET 相同,
+      # 後端對中繼的請求會帶 HMAC 簽章;未設定則不簽(中繼若強制驗證會拒絕)
+      - key: RELAY_SHARED_SECRET
+        sync: false
+      # 遠端診斷 /diag 的權杖;未設定則 /diag 一律 404(建議平時不設)
+      - key: DIAG_TOKEN
+        sync: false
+      # 中繼下載上限(bytes / 秒),未設用預設 512MB / 1800s
+      - key: MAX_RELAY_DOWNLOAD_BYTES
+        sync: false
+      - key: MAX_RELAY_DOWNLOAD_SECONDS
+        sync: false
