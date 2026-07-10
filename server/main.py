@@ -1028,6 +1028,7 @@ CHUNK_SEC = 540                # 每段 9 分鐘(16k 單聲道 32k ≈ 2MB,遠�
 CHUNK_WORKERS = 3              # 同一任務內分段並行轉錄數
 JOBS_PER_HOUR_PER_USER = 40   # 每使用者每小時建立任務上限(防濫用)
 WATCHDOG_MAX_SEC = 4 * 3600   # 任務逾此時長仍 processing 視為卡住(> 3 小時上限)
+STARTUP_STALE_SEC = 20 * 60   # 啟動救援門檻:重啟前逾 20 分未完成的任務直接失敗退款
 _v3_jobs: dict = {}            # job_id(=usage_log id) -> 狀態
 _v3_lock = threading.Lock()
 _user_hits: dict = defaultdict(deque)     # uid -> deque[timestamp]
@@ -1365,34 +1366,49 @@ def _cleanup_loop():
             pass
 
 
+def _watchdog_scan(max_age_sec: int) -> None:
+    """掃 DB:逾時仍 processing/reserved 的任務自動失敗退款;並清理過期逐字稿結果。
+    max_age_sec 較小(啟動掃描)可救回上次程序重啟時中斷、狀態卡在 DB 的任務。"""
+    _, supabase_url, service_key = _paid_env()
+    if not (supabase_url and service_key):
+        return
+    threshold = (datetime.now(timezone.utc)
+                 - timedelta(seconds=max_age_sec)).strftime("%Y-%m-%dT%H:%M:%S")
+    url = (f"{supabase_url}/rest/v1/usage_logs"
+           f"?status=in.(reserved,processing)&created_at=lt.{threshold}"
+           f"&select=id,user_id")
+    req = urllib.request.Request(url, headers={
+        "apikey": service_key, "Authorization": f"Bearer {service_key}"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        rows = json.loads(r.read().decode() or "[]")
+    for row in rows:
+        jid, u = row.get("id"), row.get("user_id")
+        with _v3_lock:
+            if jid in _v3_jobs:      # 本機仍在跑,不動它
+                continue
+        try:
+            _sb_rpc("fail_transcription", {
+                "p_usage_id": jid, "p_user_id": u, "p_reason": "watchdog_timeout"})
+        except Exception:
+            pass
+    try:
+        _sb_rpc("expire_results", {})   # 過期逐字稿去內容化(帳務保留);函式不存在則忽略
+    except Exception:
+        pass
+
+
 def _watchdog_loop():
-    """每 15 分鐘掃 DB:卡住(逾 4 小時仍 processing/reserved)的任務自動失敗退款。
-    對應規畫書 11.2:救回因當機/重啟/掛住而沒走完流程、又沒被使用者輪詢到的任務。"""
+    """啟動後先做一次「重啟救援」掃描(短門檻,救回本次重啟前卡住的任務),
+    之後每 15 分鐘掃一次(4 小時逾時門檻)。"""
+    time.sleep(30)   # 讓 Web/依賴先就緒
+    try:
+        _watchdog_scan(STARTUP_STALE_SEC)
+    except Exception:
+        pass
     while True:
         time.sleep(900)
         try:
-            _, supabase_url, service_key = _paid_env()
-            if not (supabase_url and service_key):
-                continue
-            threshold = (datetime.now(timezone.utc)
-                         - timedelta(seconds=WATCHDOG_MAX_SEC)).strftime("%Y-%m-%dT%H:%M:%S")
-            url = (f"{supabase_url}/rest/v1/usage_logs"
-                   f"?status=in.(reserved,processing)&created_at=lt.{threshold}"
-                   f"&select=id,user_id")
-            req = urllib.request.Request(url, headers={
-                "apikey": service_key, "Authorization": f"Bearer {service_key}"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                rows = json.loads(r.read().decode() or "[]")
-            for row in rows:
-                jid, u = row.get("id"), row.get("user_id")
-                with _v3_lock:
-                    if jid in _v3_jobs:      # 本機仍在跑,不動它
-                        continue
-                try:
-                    _sb_rpc("fail_transcription", {
-                        "p_usage_id": jid, "p_user_id": u, "p_reason": "watchdog_timeout"})
-                except Exception:
-                    pass
+            _watchdog_scan(WATCHDOG_MAX_SEC)
         except Exception:
             pass
 
@@ -1602,6 +1618,21 @@ def _trial_today():
     return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
 
 
+def _trial_db_enabled() -> bool:
+    """有設定 Supabase service_role 就用資料庫持久化(重啟不歸零、多實例一致)"""
+    _, supabase_url, service_key = _paid_env()
+    return bool(supabase_url and service_key)
+
+
+def _rpc1(fn: str, payload: dict):
+    """呼叫 RPC 並取回單列結果(PostgREST 回 list)"""
+    res = _sb_rpc(fn, payload)
+    if isinstance(res, list):
+        return res[0] if res else None
+    return res
+
+
+# ---- 記憶體後備(未設定 Supabase 時,例如純 byok 部署) ----
 def _trial_used(key: str, today: str) -> int:
     rec = _trial_ip.get(key)
     return rec["sec"] if rec and rec.get("date") == today else 0
@@ -1612,6 +1643,12 @@ def _trial_remaining(keys) -> int:
     if isinstance(keys, str):
         keys = [keys]
     per_key, _ = _trial_limits()
+    if _trial_db_enabled():
+        try:
+            v = _rpc1("trial_remaining", {"p_keys": keys, "p_per_key_limit": per_key})
+            return int(v if v is not None else per_key)
+        except Exception:
+            pass  # 資料庫暫時不可用 → 退回記憶體估算(從寬,避免擋住使用者)
     today = _trial_today()
     with _trial_lock:
         used = max((_trial_used(k, today) for k in keys), default=0)
@@ -1619,18 +1656,22 @@ def _trial_remaining(keys) -> int:
 
 
 def _trial_reserve(keys, cost: int):
-    """檢查每鍵(IP/裝置)與全站每日剩餘;足夠則對所有鍵記入用量。
-    不足回傳 (False, 原因)。狀態存於行程記憶體(重啟即歸零)——持久化到
-    資料庫列為既定 TODO,現階段以雙鍵+全站上限+Render 單實例控管風險。"""
+    """檢查每鍵(IP/裝置)與全站每日剩餘;足夠則對所有鍵記入用量。不足回 (False, 原因)。
+    有 Supabase 時走資料庫原子 RPC(持久化);否則用行程記憶體。"""
     if isinstance(keys, str):
         keys = [keys]
     per_key, total = _trial_limits()
+    if _trial_db_enabled():
+        row = _rpc1("trial_reserve", {"p_keys": keys, "p_cost": cost,
+                                      "p_per_key_limit": per_key, "p_total_limit": total})
+        if row and row.get("ok"):
+            return True, None
+        return False, (row or {}).get("reason") or "ip"
     today = _trial_today()
     with _trial_lock:
         if _trial_global.get("date") != today:
             _trial_global["date"] = today
             _trial_global["sec"] = 0
-            # 換日順手清掉舊記錄,避免 dict 無限成長
             for k in [k for k, v in _trial_ip.items() if v.get("date") != today]:
                 del _trial_ip[k]
         for k in keys:
@@ -1650,6 +1691,12 @@ def _trial_refund(keys, sec: int) -> None:
         return
     if isinstance(keys, str):
         keys = [keys]
+    if _trial_db_enabled():
+        try:
+            _sb_rpc("trial_refund", {"p_keys": keys, "p_cost": sec})
+            return
+        except Exception:
+            pass
     today = _trial_today()
     with _trial_lock:
         for k in keys:

@@ -27,6 +27,8 @@ def mock_ai(m, monkeypatch):
     monkeypatch.setattr(m, "_whisper_transcribe", lambda p, k: "測試逐字稿")
     monkeypatch.setattr(m, "_gpt_correct",
                         lambda t, k, remove_fillers=False, speakers=False: t + "!")
+    # 這組測試針對端點+額度邏輯,走記憶體後備路徑(資料庫路徑由 test_sql.py 覆蓋)
+    monkeypatch.setattr(m, "_trial_db_enabled", lambda: False)
 
 
 def post(client, wav, ip, dev=None):
