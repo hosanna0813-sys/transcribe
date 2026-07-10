@@ -95,7 +95,7 @@ def test_cancelled_order_rejected(client, m):
 
 
 def test_production_requires_real_keys(m, monkeypatch):
-    monkeypatch.setattr(m, "IS_PRODUCTION", True)
+    monkeypatch.setenv("APP_ENV", "production")   # ecpay 於呼叫時讀環境
     for k in ("ECPAY_MERCHANT_ID", "ECPAY_HASH_KEY", "ECPAY_HASH_IV"):
         monkeypatch.delenv(k, raising=False)
     from fastapi import HTTPException

@@ -20,7 +20,7 @@ RUN git clone --single-branch --branch 1.3.1 --depth 1 \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY main.py start.sh ./
+COPY main.py pricing.py ecpay.py relay.py start.sh ./
 RUN chmod +x start.sh
 
 # 以非 root 使用者執行(暫存寫入系統 /tmp,不需額外權限)

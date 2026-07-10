@@ -12,7 +12,7 @@ if not DB:
 
 SCHEMA_FILES = ["schema.sql", "schema_phase2.sql", "schema_phase3.sql",
                 "schema_phase4.sql", "schema_phase5.sql", "schema_history.sql",
-                "schema_pay.sql", "schema_phase6.sql"]
+                "schema_pay.sql", "schema_phase6.sql", "schema_phase7.sql"]
 V2 = os.path.join(os.path.dirname(__file__), "..", "v2")
 
 STUB = """
@@ -93,6 +93,20 @@ def test_trial_rpcs(conn):
     assert ok is False and reason == "global"
     conn.execute("select public.trial_refund(%s, 100)", (keys,))
     assert conn.execute("select public.trial_remaining(%s, 600)", (keys[:1],)).fetchone()[0] == 600
+
+
+def test_cost_stats_persisted(conn):
+    uid = _new_user(conn)
+    ok, jid = _reserve(conn, uid, 300, 0)
+    assert ok
+    conn.execute("""select ok from public.complete_transcription(
+        %s,%s,300,0.05,'t',1200,800,'{"total_usd":0.05}'::jsonb)""", (jid, uid))
+    pt, ct, cost = conn.execute(
+        "select prompt_tokens, completion_tokens, estimated_openai_cost_usd from public.usage_logs where id=%s",
+        (jid,)).fetchone()
+    assert pt == 1200 and ct == 800 and float(cost) == 0.05
+    # 對帳檢視可讀
+    assert conn.execute("select prompt_tokens from public.job_cost_summary where id=%s", (jid,)).fetchone()[0] == 1200
 
 
 def test_check_constraints(conn):
