@@ -23,6 +23,14 @@ services:
       # 階段五:每日免費額度(分鐘);未設定或 0 = 關閉免費試用
       - key: FREE_DAILY_MINUTES
         sync: false
+      # 首頁免費試用(免登入,由營運者金鑰付費):
+      #   TRIAL_MINUTES           每個 IP 每日可試用的分鐘數(預設 10)
+      #   TRIAL_DAILY_TOTAL_MINUTES 全站每日試用總量上限(預設 300,0=不限,保護荷包)
+      # 未設 OPENAI_API_KEY 時試用自動停用
+      - key: TRIAL_MINUTES
+        sync: false
+      - key: TRIAL_DAILY_TOTAL_MINUTES
+        sync: false
       # 金流(綠界 ECPay);未設定則用綠界公開測試值,可先在測試環境試
       - key: ECPAY_MERCHANT_ID
         sync: false

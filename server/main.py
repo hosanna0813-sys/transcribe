@@ -1313,3 +1313,155 @@ def api_pay_return():
     site = os.environ.get("SITE_V2_URL") or "../"
     sep = "&" if "?" in site else "?"
     return RedirectResponse(site + sep + "paid=1")
+
+
+# =============================================================
+# 免費試用(首頁,免登入):由營運者金鑰付費,以每 IP 每日 + 全站每日總量雙限
+# 保護荷包。只做短音檔/短片段(≤ TRIAL_MINUTES 分鐘)。
+# =============================================================
+_trial_ip: dict = {}                       # ip -> {"date": date, "sec": used}
+_trial_global = {"date": None, "sec": 0}
+_trial_lock = threading.Lock()
+
+
+def _trial_limits():
+    try:
+        per_ip = max(1, int(os.environ.get("TRIAL_MINUTES", "10"))) * 60
+    except ValueError:
+        per_ip = 600
+    try:
+        total = int(os.environ.get("TRIAL_DAILY_TOTAL_MINUTES", "300")) * 60  # 0=不限
+    except ValueError:
+        total = 300 * 60
+    return per_ip, total
+
+
+def _trial_today():
+    return datetime.now(timezone(timedelta(hours=8))).date().isoformat()
+
+
+def _trial_remaining(ip: str) -> int:
+    per_ip, _ = _trial_limits()
+    today = _trial_today()
+    with _trial_lock:
+        rec = _trial_ip.get(ip)
+        used = rec["sec"] if rec and rec.get("date") == today else 0
+    return max(0, per_ip - used)
+
+
+def _trial_reserve(ip: str, cost: int):
+    """檢查每 IP 與全站每日剩餘;足夠則記入用量。不足回傳 (False, 原因)"""
+    per_ip, total = _trial_limits()
+    today = _trial_today()
+    with _trial_lock:
+        rec = _trial_ip.get(ip)
+        ip_used = rec["sec"] if rec and rec.get("date") == today else 0
+        if _trial_global.get("date") != today:
+            _trial_global["date"] = today
+            _trial_global["sec"] = 0
+        if ip_used + cost > per_ip:
+            return False, "ip"
+        if total > 0 and _trial_global["sec"] + cost > total:
+            return False, "global"
+        _trial_ip[ip] = {"date": today, "sec": ip_used + cost}
+        _trial_global["sec"] += cost
+    return True, None
+
+
+@app.post("/api/trial")
+def api_trial(
+    request: Request,
+    file: UploadFile | None = File(None),
+    youtube_url: str | None = Form(None),
+    start: float | None = Form(None),
+    end: float | None = Form(None),
+    correct: bool = Form(True),
+):
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(503, "免費試用暫時未啟用")
+    rate_check("audio", request)
+    ip = client_ip(request)
+    per_ip, _ = _trial_limits()
+    if _trial_remaining(ip) <= 0:
+        raise HTTPException(429, f"今日免費試用({per_ip // 60} 分鐘)已用完,登入儲值即可繼續使用")
+
+    if not _audio_slots.acquire(blocking=False):
+        raise HTTPException(429, "伺服器忙碌中,請稍候一分鐘再試")
+    tmpdir = tempfile.mkdtemp(prefix="ytpaid-")
+    src = os.path.join(tmpdir, "src")
+    reserved = 0
+    try:
+        if youtube_url:
+            check_url(youtube_url)
+            # 試用只截取 per_ip 分鐘窗:未給或給太長的終點,一律夾到 起點+per_ip,
+            # 避免家用中繼把整支長片抓回來再被擋
+            s = start if (start and start > 0) else 0
+            cap_end = s + per_ip
+            if end is None or end > cap_end:
+                end = cap_end
+            start = s
+            _relay_fetch_audio(youtube_url, start, end, src)
+        elif file is not None:
+            size = 0
+            with open(src, "wb") as out:
+                while True:
+                    chunk = file.file.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > MAX_FILE_BYTES:
+                        raise HTTPException(413, "檔案超過 100 MB 上限")
+                    out.write(chunk)
+            if size == 0:
+                raise HTTPException(400, "沒有收到音檔")
+        else:
+            raise HTTPException(400, "請提供音檔或 YouTube 網址")
+
+        duration = _ffprobe_seconds(src)
+        if duration <= 0:
+            raise HTTPException(400, "音檔長度為 0 或無法辨識")
+        if duration > per_ip:
+            raise HTTPException(400, f"免費試用僅限 {per_ip // 60} 分鐘內,請截取較短片段或登入使用")
+
+        ok, why = _trial_reserve(ip, int(math.ceil(duration)))
+        if not ok:
+            if why == "global":
+                raise HTTPException(429, "今日免費試用總量已滿,請稍後或登入儲值使用")
+            raise HTTPException(429, f"今日免費試用({per_ip // 60} 分鐘)已用完,登入儲值即可繼續使用")
+        reserved = int(math.ceil(duration))
+
+        m4a = os.path.join(tmpdir, "audio.m4a")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", src,
+                 "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k",
+                 "-movflags", "+faststart", m4a],
+                check=True, timeout=600, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            raise HTTPException(500, f"音訊轉檔失敗:{(e.stderr or b'').decode(errors='ignore')[:200]}")
+        except subprocess.TimeoutExpired:
+            raise HTTPException(504, "音訊轉檔逾時")
+
+        text = _whisper_transcribe(m4a, api_key)
+        if correct and text:
+            try:
+                text = _gpt_correct(text, api_key)
+            except Exception:
+                pass
+        return {"text": text, "trial_remaining_minutes": _trial_remaining(ip) // 60}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"轉錄失敗:{str(e)[:200]}")
+    finally:
+        _audio_slots.release()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+@app.get("/api/trial/status")
+def api_trial_status(request: Request):
+    per_ip, _ = _trial_limits()
+    enabled = bool(os.environ.get("OPENAI_API_KEY"))
+    return {"enabled": enabled, "trial_minutes": per_ip // 60,
+            "remaining_minutes": _trial_remaining(client_ip(request)) // 60}
