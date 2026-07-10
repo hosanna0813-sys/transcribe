@@ -14,6 +14,7 @@ import ipaddress
 import os
 import re
 import glob
+import secrets
 import shutil
 import subprocess
 import tempfile
@@ -992,9 +993,17 @@ MAX_JOB_SEC = 3 * 3600         # 長音檔上限 3 小時
 CHUNK_SEC = 540                # 每段 9 分鐘(16k 單聲道 32k ≈ 2MB,遠小於 Whisper 25MB)
 CHUNK_WORKERS = 3              # 同一任務內分段並行轉錄數
 JOBS_PER_HOUR_PER_USER = 40   # 每使用者每小時建立任務上限(防濫用)
-WATCHDOG_MAX_SEC = 4 * 3600   # 任務逾此時長仍 processing 視為卡住(> 3 小時上限)
-STARTUP_STALE_SEC = 20 * 60   # 啟動救援門檻:重啟前逾 20 分未完成的任務直接失敗退款
-_v3_jobs: dict = {}            # job_id(=usage_log id) -> 狀態
+# ---- 背景任務佇列(資料庫佇列 + 就地 Worker;Render 免費方案無獨立 Worker 服務)----
+try:
+    WORKER_CONCURRENCY = max(1, int(os.environ.get("WORKER_CONCURRENCY", "1")))
+except ValueError:
+    WORKER_CONCURRENCY = 1
+JOB_STALE_SEC = 180           # 心跳逾此秒數視為 worker 死亡 → 退回佇列重試
+JOB_MAX_RETRY = 2             # 每筆任務最多自動重試次數(逾此則失敗退款)
+HEARTBEAT_EVERY = 30          # worker 處理中每隔幾秒更新一次心跳
+JOB_SRC_DIR = os.path.join(tempfile.gettempdir(), "jobsrc")   # 上傳檔暫存(worker 讀)
+_worker_wake = threading.Event()
+_v3_jobs: dict = {}            # job_id(=usage_log id) -> 記憶體即時狀態(僅供進度顯示)
 _v3_lock = threading.Lock()
 _user_hits: dict = defaultdict(deque)     # uid -> deque[timestamp]
 _user_rate_lock = threading.Lock()
@@ -1097,11 +1106,59 @@ def _transcode_and_segment(src: str, tmpdir: str) -> list:
     return sorted(glob.glob(os.path.join(tmpdir, "seg_*.m4a")))
 
 
-def _run_job(job_id, uid, src_path, duration, tmpdir, api_key, do_correct=False):
-    """背景執行:切段 → 分批轉錄 → 合併 →(可選)GPT 校正 → 結算;失敗退款。"""
+class _Cancelled(Exception):
+    pass
+
+
+def _process_job(job_id, uid, jobrow, api_key):
+    """Worker 執行一筆任務:取得音訊 → 切段 → 分批轉錄 → 合併 →(可選)校正 → 結算。
+    心跳定期更新;偵測到取消即中止。失敗依重試上限退回佇列或失敗退款。"""
+    tmpdir = tempfile.mkdtemp(prefix="ytpaid-")
+    upload_path = jobrow.get("upload_path")
+    hb_stop = threading.Event()
+    cancelled = {"v": False}
+    terminal = {"v": False}   # True=已結案(可刪上傳檔);requeue 時保留供下次重試
+
+    def heartbeat():
+        while not hb_stop.wait(HEARTBEAT_EVERY):
+            try:
+                st = _rpc1("job_heartbeat", {"p_usage_id": job_id})
+                if st == "cancelled":
+                    cancelled["v"] = True
+                    hb_stop.set()
+            except Exception:
+                pass
+
+    def ck():
+        if cancelled["v"]:
+            raise _Cancelled()
+
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
     try:
-        _job_set(job_id, status="processing", stage="轉檔切段中", progress=0)
-        segs = _transcode_and_segment(src_path, tmpdir)
+        _job_set(job_id, status="processing", stage="準備中", progress=0)
+        src = os.path.join(tmpdir, "src")
+        if jobrow.get("source_type") == "youtube":
+            _job_set(job_id, stage="取得音訊中", progress=0)
+            _relay_fetch_audio(jobrow.get("youtube_url"),
+                               jobrow.get("start_seconds"), jobrow.get("end_seconds"), src)
+        else:
+            if not upload_path or not os.path.exists(upload_path):
+                # 上傳檔已失效(通常是重啟後暫存遺失)→ 不可重試,直接失敗退款
+                terminal["v"] = True
+                try:
+                    _sb_rpc("fail_transcription", {
+                        "p_usage_id": job_id, "p_user_id": uid, "p_reason": "upload_lost"})
+                except Exception:
+                    pass
+                _job_set(job_id, status="failed", error="上傳檔已失效,請重新上傳轉錄")
+                return
+            src = upload_path
+        ck()
+
+        duration = jobrow.get("duration_seconds") or _ffprobe_seconds(src)
+        _job_set(job_id, stage="轉檔切段中", progress=0)
+        segs = _transcode_and_segment(src, tmpdir)
         n = len(segs)
         if n == 0:
             raise RuntimeError("切段失敗,沒有可轉錄的音訊")
@@ -1110,6 +1167,7 @@ def _run_job(job_id, uid, src_path, duration, tmpdir, api_key, do_correct=False)
         prog_lock = threading.Lock()
 
         def work(i):
+            ck()
             texts[i] = _whisper_transcribe(segs[i], api_key)
             with prog_lock:
                 done[0] += 1
@@ -1126,22 +1184,22 @@ def _run_job(job_id, uid, src_path, duration, tmpdir, api_key, do_correct=False)
                     errs.append(e)
         if errs:
             raise errs[0]
+        ck()
 
         parts = []
         for i, t in enumerate(texts):
-            marker = _fmt_hms(i * CHUNK_SEC)
-            parts.append((marker + " " + (t or "")).strip())
+            parts.append((_fmt_hms(i * CHUNK_SEC) + " " + (t or "")).strip())
         full = "\n\n".join(parts).strip()
 
-        # 可選:GPT 校正(修錯字/標點);校正失敗就退回未校正原文,不讓整筆失敗
         cu = None
-        if do_correct and full:
+        if jobrow.get("correction_requested") and full:
             _job_set(job_id, stage="校正中", progress=100)
             cu = {}
             try:
                 full = _gpt_correct(full, api_key, usage=cu)
             except Exception:
-                cu = None   # 校正失敗 → 不計校正成本
+                cu = None   # 校正失敗 → 退回未校正原文,不計校正成本、不讓整筆失敗
+        ck()
 
         cost, pt, ct = _settle_cost(duration, cu)
         settle = _sb_rpc("complete_transcription", {
@@ -1150,22 +1208,63 @@ def _run_job(job_id, uid, src_path, duration, tmpdir, api_key, do_correct=False)
             "p_result_text": full,
             "p_prompt_tokens": pt, "p_completion_tokens": ct, "p_pricing": cost,
         })
+        terminal["v"] = True
         srow = settle[0] if isinstance(settle, list) else settle
         remaining = (srow or {}).get("remaining")
         if remaining is None:
             remaining = _sb_balance(uid)
         _job_set(job_id, status="done", progress=100, text=full, remaining=remaining)
+    except _Cancelled:
+        terminal["v"] = True   # 使用者取消:退款已由 cancel_job 處理,worker 只需收拾
+        _job_set(job_id, status="failed", error="已取消")
     except Exception as e:
-        try:
-            _sb_rpc("fail_transcription", {
-                "p_usage_id": job_id, "p_user_id": uid, "p_reason": "job_error"})
-        except Exception:
-            pass
         detail = e.detail if isinstance(e, HTTPException) else str(e)
-        _job_set(job_id, status="failed", error=str(detail)[:200])
+        try:
+            outcome = _rpc1("job_retry_or_fail", {
+                "p_usage_id": job_id, "p_max_retry": JOB_MAX_RETRY, "p_error": str(detail)[:100]})
+        except Exception:
+            outcome = None
+        if outcome == "requeued":
+            _job_set(job_id, status="queued", stage="稍後重試", progress=0)
+            _worker_wake.set()
+        else:
+            terminal["v"] = True
+            _job_set(job_id, status="failed", error=str(detail)[:200])
     finally:
-        _audio_slots.release()
+        hb_stop.set()
         shutil.rmtree(tmpdir, ignore_errors=True)
+        if terminal["v"] and upload_path:
+            try:
+                os.remove(upload_path)
+            except OSError:
+                pass
+
+
+def _worker_loop():
+    """就地 Worker:輪詢資料庫佇列,認領 queued 任務並處理。單一 Web 實例內執行。"""
+    time.sleep(20)   # 讓依賴先就緒
+    while True:
+        api_key, supabase_url, service_key = _paid_env()
+        if not (api_key and supabase_url and service_key):
+            time.sleep(30)
+            continue
+        try:
+            row = _rpc1("claim_next_job", {"p_stale_sec": JOB_STALE_SEC, "p_max_retry": JOB_MAX_RETRY})
+        except Exception:
+            row = None
+        if row and row.get("usage_id"):
+            jid = row["usage_id"]
+            with _v3_lock:
+                if jid not in _v3_jobs:
+                    _v3_jobs[jid] = {"status": "processing", "stage": "準備中",
+                                     "progress": 0, "uid": row.get("user_id")}
+            try:
+                _process_job(jid, row.get("user_id"), row, api_key)
+            except Exception:
+                pass
+        else:
+            _worker_wake.wait(timeout=10)
+            _worker_wake.clear()
 
 
 @app.post("/api/jobs")
@@ -1186,20 +1285,40 @@ def api_create_job(
     uid = _verify_jwt(authorization)
     _user_rate_check(uid)
 
-    if not _audio_slots.acquire(blocking=False):
-        raise HTTPException(429, "伺服器忙碌中,請稍候一分鐘再試")
-    tmpdir = tempfile.mkdtemp(prefix="ytpaid-")
-    src = os.path.join(tmpdir, "src")
-    started = False
-    usage_id = None
+    # 只做「驗證輸入 + 取得長度 + 入列」;實際下載/轉錄交給就地 Worker(不阻塞請求)。
+    upload_path = None
+    yt_start = yt_end = None
     try:
         if youtube_url:
             check_url(youtube_url)
-            _relay_fetch_audio(youtube_url, start, end, src)
+            if start is not None and end is not None and end <= start:
+                raise HTTPException(400, "終點必須大於起點")
+            meta = probe(youtube_url)
+            _reject_live(meta)
+            vdur = int(meta.get("duration") or 0)
+            s = int(start) if start else 0
+            if start is None and end is None:
+                if vdur <= 0:
+                    raise HTTPException(400, "無法取得影片長度,請指定明確的起訖時間再試")
+                if vdur > MAX_JOB_SEC:
+                    raise HTTPException(400, f"影片超過 {MAX_JOB_SEC // 3600} 小時,請用起訖時間截取")
+                duration = vdur
+            else:
+                e = int(end) if end is not None else (vdur or 0)
+                if e <= 0:
+                    raise HTTPException(400, "無法取得影片長度,請指定明確的終點時間")
+                duration = e - s
+                if duration <= 0:
+                    raise HTTPException(400, "截取範圍無效")
+                if duration > MAX_CLIP_SEC:
+                    raise HTTPException(400, "截取片段超過 2 小時上限,請縮短範圍")
+                yt_start, yt_end = s, e
             source_type, source_name = "youtube", youtube_url[:200]
         elif file is not None:
+            os.makedirs(JOB_SRC_DIR, exist_ok=True)
+            upload_path = os.path.join(JOB_SRC_DIR, secrets.token_hex(16))
             size = 0
-            with open(src, "wb") as out:
+            with open(upload_path, "wb") as out:
                 while True:
                     chunk = file.file.read(1024 * 1024)
                     if not chunk:
@@ -1210,22 +1329,30 @@ def api_create_job(
                     out.write(chunk)
             if size == 0:
                 raise HTTPException(400, "沒有收到音檔")
+            duration = _ffprobe_seconds(upload_path)
+            if duration <= 0:
+                raise HTTPException(400, "音檔長度為 0 或無法辨識")
+            if duration > MAX_JOB_SEC:
+                raise HTTPException(400, f"超過 {MAX_JOB_SEC // 3600} 小時上限,請縮短範圍")
             source_type, source_name = "upload", (file.filename or "")[:200]
         else:
             raise HTTPException(400, "請提供音檔或 YouTube 網址")
 
-        duration = _ffprobe_seconds(src)
-        if duration <= 0:
-            raise HTTPException(400, "音檔長度為 0 或無法辨識")
-        if duration > MAX_JOB_SEC:
-            raise HTTPException(400, f"超過 {MAX_JOB_SEC // 3600} 小時上限,請縮短範圍")
         cost = int(math.ceil(duration))
-
-        res = _sb_rpc("reserve_transcription", {
-            "p_user_id": uid, "p_cost": cost,
-            "p_source_type": source_type, "p_source_name": source_name, "p_duration": cost,
-            "p_free_limit": _free_daily_credits(),
-        })
+        try:
+            res = _sb_rpc("enqueue_transcription", {
+                "p_user_id": uid, "p_cost": cost,
+                "p_source_type": source_type, "p_source_name": source_name, "p_duration": cost,
+                "p_free_limit": _free_daily_credits(),
+                "p_youtube_url": youtube_url if source_type == "youtube" else None,
+                "p_start": yt_start, "p_end": yt_end,
+                "p_upload_path": upload_path, "p_correct": bool(correct),
+            })
+        except HTTPException as e:
+            # migration(schema_phase8)尚未套用時 RPC 不存在 → 給明確訊息(短音檔仍可用)
+            if "PGRST202" in str(getattr(e, "detail", "")) or "enqueue_transcription" in str(getattr(e, "detail", "")):
+                raise HTTPException(503, "長音檔背景轉錄升級中,暫時無法使用(站長:請套用 v2/schema_phase8.sql)")
+            raise
         row = res[0] if isinstance(res, list) else res
         if not row or not row.get("ok"):
             reason = (row or {}).get("reason")
@@ -1235,29 +1362,23 @@ def api_create_job(
                 raise HTTPException(409, "已有一個轉錄任務進行中,請待完成後再試")
             raise HTTPException(502, "預扣額度失敗,請稍後再試")
         usage_id = row["usage_id"]
+        upload_path = None   # 交棒給 worker:別在 finally 刪掉
 
         with _v3_lock:
-            _v3_jobs[usage_id] = {"status": "processing", "stage": "準備中",
+            _v3_jobs[usage_id] = {"status": "queued", "stage": "排隊中",
                                   "progress": 0, "uid": uid}
-        threading.Thread(target=_run_job,
-                         args=(usage_id, uid, src, duration, tmpdir, api_key, correct),
-                         daemon=True).start()
-        started = True                      # 交棒給背景執行緒:槽與暫存由它清理
-        return {"job_id": usage_id, "duration_seconds": int(math.ceil(duration))}
+        _worker_wake.set()   # 叫醒 worker 立即認領
+        return {"job_id": usage_id, "duration_seconds": cost}
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(502, f"建立任務失敗:{str(e)[:200]}")
     finally:
-        if not started:
-            if usage_id is not None:
-                try:
-                    _sb_rpc("fail_transcription", {
-                        "p_usage_id": usage_id, "p_user_id": uid, "p_reason": "start_failed"})
-                except Exception:
-                    pass
-            _audio_slots.release()
-            shutil.rmtree(tmpdir, ignore_errors=True)
+        if upload_path:   # 入列失敗才需清掉暫存上傳檔
+            try:
+                os.remove(upload_path)
+            except OSError:
+                pass
 
 
 @app.get("/api/jobs/{job_id}")
@@ -1291,7 +1412,7 @@ def api_job_status(job_id: str, authorization: str | None = Header(None)):
             return {"status": "failed", "error": j.get("error", "轉錄失敗")}
         return {"status": "processing", "stage": j.get("stage", ""), "progress": j.get("progress", 0)}
 
-    # 不在記憶體:可能已被別的輪詢取走,或伺服器重啟造成孤兒任務
+    # 不在記憶體:可能已被別的輪詢取走,或本實例重啟後由 worker 接手中
     res = _sb_rpc("claim_result", {"p_usage_id": job_id, "p_user_id": uid})
     row = (res[0] if res else None) if isinstance(res, list) else res
     if not row:
@@ -1303,16 +1424,32 @@ def api_job_status(job_id: str, authorization: str | None = Header(None)):
             bal = _sb_balance(uid)
             return {"status": "done", "progress": 100, "text": text,
                     "remaining_credits": bal, "remaining_minutes": bal // 60}
-        return {"status": "done", "progress": 100, "text": "",
-                "note": "結果已取走"}
-    if status in ("reserved", "processing"):
-        try:
-            _sb_rpc("fail_transcription", {
-                "p_usage_id": job_id, "p_user_id": uid, "p_reason": "server_restart"})
-        except Exception:
-            pass
-        return {"status": "failed", "error": "伺服器重新啟動,任務中斷,已退款,請重試"}
+        return {"status": "done", "progress": 100, "text": "", "note": "結果已取走"}
+    if status in ("reserved", "queued", "processing"):
+        # 不再因重啟就判失敗:worker 會重新認領/重試,逾時退款由 sweep 處理
+        _worker_wake.set()
+        return {"status": "processing", "stage": "排隊處理中", "progress": 0}
+    if status == "cancelled":
+        return {"status": "failed", "error": "已取消"}
     return {"status": "failed", "error": "任務已結束(失敗或已退款)"}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def api_job_cancel(job_id: str, authorization: str | None = Header(None)):
+    _, supabase_url, service_key = _paid_env()
+    if not (supabase_url and service_key):
+        raise HTTPException(503, "服務尚未設定")
+    uid = _verify_jwt(authorization)
+    res = _sb_rpc("cancel_job", {"p_usage_id": job_id, "p_user_id": uid})
+    row = (res[0] if res else None) if isinstance(res, list) else res
+    if not row or not row.get("ok"):
+        raise HTTPException(409, "任務無法取消(可能已結束)")
+    with _v3_lock:
+        if job_id in _v3_jobs:
+            _v3_jobs[job_id]["status"] = "failed"
+            _v3_jobs[job_id]["error"] = "已取消"
+    rem = row.get("remaining") or 0
+    return {"ok": True, "remaining_credits": rem, "remaining_minutes": int(rem) // 60}
 
 
 def _cleanup_loop():
@@ -1330,59 +1467,37 @@ def _cleanup_loop():
                             shutil.rmtree(p, ignore_errors=True)
                     except OSError:
                         pass
+            # 孤兒上傳暫存檔(入列失敗殘留或極端狀況)逾 24 小時清掉
+            if os.path.isdir(JOB_SRC_DIR):
+                for name in os.listdir(JOB_SRC_DIR):
+                    p = os.path.join(JOB_SRC_DIR, name)
+                    try:
+                        if now - os.path.getmtime(p) > 24 * 3600:
+                            os.remove(p)
+                    except OSError:
+                        pass
         except Exception:
             pass
-
-
-def _watchdog_scan(max_age_sec: int) -> None:
-    """掃 DB:逾時仍 processing/reserved 的任務自動失敗退款;並清理過期逐字稿結果。
-    max_age_sec 較小(啟動掃描)可救回上次程序重啟時中斷、狀態卡在 DB 的任務。"""
-    _, supabase_url, service_key = _paid_env()
-    if not (supabase_url and service_key):
-        return
-    threshold = (datetime.now(timezone.utc)
-                 - timedelta(seconds=max_age_sec)).strftime("%Y-%m-%dT%H:%M:%S")
-    url = (f"{supabase_url}/rest/v1/usage_logs"
-           f"?status=in.(reserved,processing)&created_at=lt.{threshold}"
-           f"&select=id,user_id")
-    req = urllib.request.Request(url, headers={
-        "apikey": service_key, "Authorization": f"Bearer {service_key}"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        rows = json.loads(r.read().decode() or "[]")
-    for row in rows:
-        jid, u = row.get("id"), row.get("user_id")
-        with _v3_lock:
-            if jid in _v3_jobs:      # 本機仍在跑,不動它
-                continue
-        try:
-            _sb_rpc("fail_transcription", {
-                "p_usage_id": jid, "p_user_id": u, "p_reason": "watchdog_timeout"})
-        except Exception:
-            pass
-    try:
-        _sb_rpc("expire_results", {})   # 過期逐字稿去內容化(帳務保留);函式不存在則忽略
-    except Exception:
-        pass
 
 
 def _watchdog_loop():
-    """啟動後先做一次「重啟救援」掃描(短門檻,救回本次重啟前卡住的任務),
-    之後每 15 分鐘掃一次(4 小時逾時門檻)。"""
-    time.sleep(30)   # 讓 Web/依賴先就緒
-    try:
-        _watchdog_scan(STARTUP_STALE_SEC)
-    except Exception:
-        pass
+    """每 2 分鐘呼叫 sweep_jobs:心跳過期且逾重試上限的任務失敗退款、孤兒 queued 逾時退款、
+    過期逐字稿去內容化。心跳/重試由 worker 認領時處理,這裡是最終兜底。"""
+    time.sleep(45)   # 讓 worker 先有機會認領
     while True:
-        time.sleep(900)
         try:
-            _watchdog_scan(WATCHDOG_MAX_SEC)
+            _, supabase_url, service_key = _paid_env()
+            if supabase_url and service_key:
+                _sb_rpc("sweep_jobs", {"p_stale_sec": JOB_STALE_SEC, "p_max_retry": JOB_MAX_RETRY})
         except Exception:
             pass
+        time.sleep(120)
 
 
 threading.Thread(target=_cleanup_loop, daemon=True).start()
 threading.Thread(target=_watchdog_loop, daemon=True).start()
+for _wi in range(WORKER_CONCURRENCY):
+    threading.Thread(target=_worker_loop, daemon=True).start()
 
 
 # =============================================================

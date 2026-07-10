@@ -246,6 +246,37 @@ SQL Editor → 貼上 `v2/schema_phase7.sql` 整份 → **Run**(可重複)。這
 > 後端程式已把價格(`pricing.py`)、金流簽章(`ecpay.py`)、中繼驗證(`relay.py`)
 > 拆成獨立模組;Dockerfile 已一併複製,無需額外設定。
 
+---
+
+# 階段八:背景任務佇列 + 就地 Worker(建議套用)
+
+SQL Editor → 貼上 `v2/schema_phase8.sql` 整份 → **Run**(可重複)。
+
+**為什麼**:原本長音檔任務是「每個請求開一條執行緒」,程序重啟就中斷、且無法重試。
+改成**資料庫佇列 + 就地 Worker**:建立任務時只「入列」(狀態 queued),由一條專責
+Worker 執行緒認領處理,狀態/心跳/重試/取消全記在資料庫。
+
+> **關於「獨立 Worker」與 Render 免費方案**:Render 免費方案沒有獨立的 Worker/Cron
+> 服務(那是付費功能),所以 Worker 以「Web 服務內的專責執行緒」實作 —— 靠資料庫佇列
+> 達成重啟續跑、重試與取消,而非另一個行程。日後升級到付費方案要拆成真正獨立的
+> Worker 服務,只需把 `_worker_loop` 放到獨立進入點、共用同一份 `schema_phase8` 佇列即可。
+
+這份 migration 會加:任務生命週期欄位(started_at/heartbeat_at/retry_count/…)、
+`queued` 狀態,以及 `enqueue_transcription`/`claim_next_job`/`job_heartbeat`/`cancel_job`/
+`sweep_jobs`/`job_retry_or_fail` 等 RPC。
+
+**效果**
+- **重啟續跑**:任務狀態在資料庫;程序重啟後 Worker 會重新認領未完成的 YouTube 任務
+  (上傳檔任務若暫存已隨重啟消失,則失敗退款,請重新上傳)。
+- **心跳 + 自動重試**:Worker 每 30 秒更新心跳;心跳逾 3 分鐘視為死亡 → 退回佇列重試
+  (最多 2 次),逾上限才失敗退款。
+- **使用者取消**:計費版轉錄進度區多了「取消任務」鈕(打 `POST /api/jobs/{id}/cancel`),
+  取消即退款。
+- **結果 TTL**:完成的逐字稿 24 小時後自動去內容化(帳務保留)。
+- 併發:預設同時 1 筆(免費方案單實例);可用 Render 環境變數 `WORKER_CONCURRENCY` 調整。
+
+套用後無需其他設定;短音檔即時上傳(`/api/transcribe`)維持原本同步流程不變。
+
 # 金流:綠界 ECPay 線上儲值
 
 使用者可在帳號頁的「儲值」區塊選方案 → 線上刷卡 / LINE Pay 付款 → 額度自動入帳。

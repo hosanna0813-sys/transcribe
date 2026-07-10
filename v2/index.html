@@ -219,6 +219,7 @@
         <div id="progBox" class="hidden">
           <div class="bar2"><i id="progFill"></i></div>
           <div class="prog-txt" id="progTxt"></div>
+          <button class="ghost" id="cancelBtn" style="margin-top:8px">取消任務</button>
         </div>
         <div id="resultBox" class="result hidden">
           <div class="result-head">
@@ -418,8 +419,9 @@
       hide('histEmpty');
       rows.forEach(function(r){
         var li=document.createElement('li');
-        var stCls=r.status==='completed'?'ok':(r.status==='failed'||r.status==='refunded'?'err':'run');
-        var stTxt=r.status==='completed'?'完成':(r.status==='failed'?'失敗':(r.status==='refunded'?'已退款':'處理中'));
+        var stCls=r.status==='completed'?'ok':(r.status==='failed'||r.status==='refunded'||r.status==='cancelled'?'err':'run');
+        var stMap={completed:'完成',failed:'失敗',refunded:'已退款',cancelled:'已取消',queued:'排隊中',processing:'處理中',reserved:'處理中'};
+        var stTxt=stMap[r.status]||r.status;
         var name=r.source_name||(r.source_type==='youtube'?'YouTube 影片':'(已刪除內容)');
         var charged=r.credits_charged||0, free=r.free_credits||0, paid=Math.max(0,charged-free);
         var costTxt=charged?('花費 '+Math.round(charged/60)+' 分'+(free?('(含免費 '+Math.round(free/60)+' 分)'):'')):'';
@@ -504,13 +506,33 @@
           return d;
         });
       }).then(function(d){
+        curJob=d.job_id;
         try{localStorage.setItem('tw_v2_job',d.job_id);}catch(e){}
-        showProg(3,'轉錄中……');
+        showProg(3,'排隊中……');
         pollJob(d.job_id);
       }).catch(function(err){
         setMsg($('transcribeMsg'),escapeHtml(err&&err.message||String(err)),'err');
         hide('progBox');setBusy(false);
       });
+    });
+
+    var curJob=null;
+    $('cancelBtn').addEventListener('click',function(){
+      if(!curJob)return;
+      var b=$('cancelBtn');b.disabled=true;b.textContent='取消中…';
+      token().then(function(tk){
+        return fetch(BACKEND_URL+'/api/jobs/'+encodeURIComponent(curJob)+'/cancel',
+          {method:'POST',headers:{'Authorization':'Bearer '+tk,'ngrok-skip-browser-warning':'1'}});
+      }).then(function(res){return res.json().catch(function(){return {};});})
+        .then(function(d){
+          if(pollTimer)clearTimeout(pollTimer);
+          try{localStorage.removeItem('tw_v2_job');}catch(e){}
+          curJob=null;hide('progBox');setBusy(false);
+          setMsg($('transcribeMsg'),'已取消,額度已退回','ok');
+          if(typeof d.remaining_credits==='number')setCredits(d.remaining_credits);
+          loadFree();loadHistory();
+        }).catch(function(){})
+        .then(function(){b.disabled=false;b.textContent='取消任務';});
     });
 
     function pollJob(jobId){
@@ -529,14 +551,14 @@
           showProg(d.progress||0,stage+(d.progress?(' '+d.progress+'%'):'……'));
           pollTimer=setTimeout(function(){pollJob(jobId);},4000);
         }else if(d.status==='done'){
-          try{localStorage.removeItem('tw_v2_job');}catch(e){}
+          curJob=null;try{localStorage.removeItem('tw_v2_job');}catch(e){}
           hide('progBox');setBusy(false);
           setMsg($('transcribeMsg'),'轉錄完成 ✓','ok');
           $('resultText').value=d.text||'';show('resultBox');
           if(typeof d.remaining_credits==='number')setCredits(d.remaining_credits);
           loadFree();loadHistory();   // 免費額度/紀錄刷新
         }else{ // failed
-          try{localStorage.removeItem('tw_v2_job');}catch(e){}
+          curJob=null;try{localStorage.removeItem('tw_v2_job');}catch(e){}
           hide('progBox');setBusy(false);
           setMsg($('transcribeMsg'),escapeHtml(d.error||'轉錄失敗'),'err');
         }
@@ -549,7 +571,7 @@
     /* 頁面載入時若有進行中的任務(localStorage),自動接回輪詢 */
     function resumeJob(){
       var jid=null;try{jid=localStorage.getItem('tw_v2_job');}catch(e){}
-      if(jid){setBusy(true);showProg(0,'接回進行中的任務……');pollJob(jid);}
+      if(jid){curJob=jid;setBusy(true);showProg(0,'接回進行中的任務……');pollJob(jid);}
     }
     $('copyBtn').addEventListener('click',function(){
       var t=$('resultText').value;
