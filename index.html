@@ -9,6 +9,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<!-- AdSense 網站載入碼(每頁 <head> 都要放,供 Google 驗證網站) -->
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-5508689053185527"
+     crossorigin="anonymous"></script>
 <!-- ⬇⬇ AdSense 設定:只要在這裡填,不必動其他地方 ⬇⬇
      1) 申請 AdSense 拿到發布商 ID 後,把 pub 填成 'ca-pub-1234567890123456' → 廣告程式自動載入,即可送審。
      2) 通過審核後,在 AdSense 後台為「內容上方」「結果下方」各建一個廣告單元,
@@ -16,9 +19,9 @@
      全部留空時,頁面顯示「待啟用」佔位框,功能與版面完全不受影響。 -->
 <script>
 window.ADS = {
-  pub: '',        // 例:'ca-pub-1234567890123456'
-  slotTop: '',    // 例:'1234567890'(內容上方)
-  slotBottom: ''  // 例:'0987654321'(結果下方)
+  pub: 'ca-pub-5508689053185527',
+  slotTop: '',    // 核准後填(內容上方版位代碼,例:'1234567890')
+  slotBottom: ''  // 核准後填(結果下方版位代碼,例:'0987654321')
 };
 </script>
 <style>
@@ -469,15 +472,12 @@ window.ADS = {
     a.download='transcript.txt';a.click();URL.revokeObjectURL(a.href);
   });
 
-  /* AdSense:依 window.ADS 設定啟用;未設定則保留佔位框(不影響功能) */
+  /* AdSense:載入碼已放在 <head>;這裡依 window.ADS 的版位代碼把兩個版位變成廣告,
+     未填版位代碼則維持佔位框(不影響功能) */
   function initAds(){
     var cfg=window.ADS||{};
     var pub=(cfg.pub||'').trim();
     if(!/^ca-pub-\d{10,}$/.test(pub))return;              // 沒填合法發布商 ID → 維持佔位
-    var s=document.createElement('script');
-    s.async=true;s.crossOrigin='anonymous';
-    s.src='https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client='+encodeURIComponent(pub);
-    document.head.appendChild(s);                          // 載入即可通過擁有權驗證、送審
     [['adTop',cfg.slotTop],['adBottom',cfg.slotBottom]].forEach(function(p){
       var box=$(p[0]),slot=(p[1]||'').trim();
       if(!box||!slot)return;                               // 版位代碼未填 → 該槽維持佔位
