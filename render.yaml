@@ -17,7 +17,9 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       # 階段三:家用中繼 ngrok 網址,供付費版 YouTube 下載(住宅 IP);
-      # 未設定則 YouTube 來源停用,上傳仍可用
+      # 未設定則 YouTube 來源停用,上傳仍可用。
+      # 可填多個(逗號分隔)做備援/分流:後端依序嘗試,某台關機/失敗自動換下一台;
+      # 多台須共用同一 RELAY_SHARED_SECRET。
       - key: HOME_RELAY_URL
         sync: false
       # 階段五:每日免費額度(分鐘);未設定或 0 = 關閉免費試用

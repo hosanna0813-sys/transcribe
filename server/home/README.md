@@ -47,6 +47,22 @@ docker compose up -d
 - 更新程式:重新下載 ZIP 覆蓋後執行 `docker compose up -d --build`
 - 電源設定:「睡眠」設為永不(螢幕可以關)
 
+### 加開第二台備援 / 分流(選填)
+
+想再找一台常開的電腦當備援,兩台同時開著、其中一台關機或忙碌時後端自動改用另一台
+(平時也會輕度分流)。做法跟上面完全一樣,只有三點不同:
+
+1. **各自獨立的 ngrok 固定網域**:ngrok 免費帳號每個帳號只給 **1 個**固定網域(第一台已用掉),
+   所以第二台請用**另一個 email 免費註冊一個 ngrok 帳號**、拿到第二個免費網域
+   (或升級 ngrok 付費方案取得多個網域)。把第二台 `.env` 的
+   `NGROK_AUTHTOKEN` / `NGROK_DOMAIN` 填成第二個帳號的值。
+2. **`RELAY_SHARED_SECRET` 必須與第一台、與 Render 完全相同**(否則後端簽章對不上,一律被 403)。
+3. 兩台都 `docker compose up -d`、各自 `https://網域/healthz` 回 `{"ok":true}` 後,到
+   **Render → Environment**,把 `HOME_RELAY_URL` 改成兩個網址**用逗號相接**:
+   `https://第一台網域,https://第二台網域`(Render 會自動重新部署,之後即具備援)。
+
+> 若是要「取代」舊那台(不做備援),就不用逗號 —— 直接把 `HOME_RELAY_URL` 換成新網域即可。
+
 ---
 
 ## 方式二:直接安裝版(不用 Docker)
