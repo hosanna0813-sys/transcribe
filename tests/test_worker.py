@@ -81,11 +81,13 @@ def dbmain(monkeypatch):
     monkeypatch.setattr(main, "_relay_info", lambda url: {"duration": 600, "too_long": False})
     monkeypatch.setattr(main, "_reject_live", lambda meta: None)
     monkeypatch.setattr(main, "_relay_fetch_audio", lambda url, s, e, dest: open(dest, "wb").write(b"x"))
-    monkeypatch.setattr(main, "_transcode_and_segment", lambda src, tmp: ["seg0", "seg1"])
+    monkeypatch.setattr(main, "_transcode_and_segment",
+                        lambda src, tmp, normalized=False: ["seg0", "seg1"])
     monkeypatch.setattr(main, "_ffprobe_seconds", lambda p: 600.0)
     monkeypatch.setattr(main, "_whisper_transcribe", lambda p, k: "逐字稿片段")
     monkeypatch.setattr(main, "_gpt_correct",
-                        lambda t, k, remove_fillers=False, speakers=False, usage=None: t + "（校正）")
+                        lambda t, k, remove_fillers=False, speakers=False, usage=None,
+                        on_progress=None: t + "（校正）")
     yield main, conn
     conn.close()
 

@@ -802,14 +802,20 @@ def _chunk_text(text: str, max_len: int = 6000) -> list:
     return chunks
 
 
+CORRECT_WORKERS = 3   # 校正塊並行數(token 總量不變 → 成本不變,只縮短等待)
+
+
 def _gpt_correct(text: str, api_key: str, remove_fillers: bool = False, speakers: bool = False,
-                 usage: dict | None = None) -> str:
-    """用 GPT 逐塊校正逐字稿(修錯字/標點,不改內容);失敗由呼叫端決定退回原文。
-    傳入 usage dict 時,累計 prompt_tokens/completion_tokens(供成本統計)。"""
+                 usage: dict | None = None, on_progress=None) -> str:
+    """用 GPT 逐塊「並行」校正逐字稿(修錯字/標點,不改內容);失敗由呼叫端決定退回原文。
+    各塊互相獨立,並行呼叫後依原始順序拼回;傳入 usage dict 時,由主執行緒統一累計
+    prompt_tokens/completion_tokens(供成本統計);on_progress(done, total) 回報進度。"""
     import httpx
-    out = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     sys_prompt = _correct_sys(remove_fillers, speakers)
-    for chunk in _chunk_text(text):
+    chunks = _chunk_text(text)
+
+    def correct_one(chunk: str):
         resp = httpx.post(
             "https://api.openai.com/v1/chat/completions",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -821,12 +827,24 @@ def _gpt_correct(text: str, api_key: str, remove_fillers: bool = False, speakers
         if resp.status_code != 200:
             raise RuntimeError(f"校正失敗:{resp.text[:150]}")
         body = resp.json()
-        out.append((body["choices"][0]["message"]["content"] or "").strip())
-        if usage is not None:
-            u = body.get("usage") or {}
-            usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + int(u.get("prompt_tokens", 0) or 0)
-            usage["completion_tokens"] = usage.get("completion_tokens", 0) + int(u.get("completion_tokens", 0) or 0)
-            usage["calls"] = usage.get("calls", 0) + 1
+        u = body.get("usage") or {}
+        return ((body["choices"][0]["message"]["content"] or "").strip(),
+                int(u.get("prompt_tokens", 0) or 0), int(u.get("completion_tokens", 0) or 0))
+
+    out = [None] * len(chunks)
+    done = 0
+    with ThreadPoolExecutor(max_workers=min(CORRECT_WORKERS, max(1, len(chunks)))) as ex:
+        futs = {ex.submit(correct_one, c): i for i, c in enumerate(chunks)}
+        for f in as_completed(futs):
+            corrected, pt, ct = f.result()   # 任一塊失敗即拋出,呼叫端退回未校正原文
+            out[futs[f]] = corrected
+            if usage is not None:
+                usage["prompt_tokens"] = usage.get("prompt_tokens", 0) + pt
+                usage["completion_tokens"] = usage.get("completion_tokens", 0) + ct
+                usage["calls"] = usage.get("calls", 0) + 1
+            done += 1
+            if on_progress is not None:
+                on_progress(done, len(chunks))
     return "\n\n".join(out).strip()
 
 
@@ -1018,7 +1036,12 @@ from datetime import datetime, timezone, timedelta
 
 MAX_JOB_SEC = 3 * 3600         # 長音檔上限 3 小時
 CHUNK_SEC = 540                # 每段 9 分鐘(16k 單聲道 32k ≈ 2MB,遠小於 Whisper 25MB)
-CHUNK_WORKERS = 3              # 同一任務內分段並行轉錄數
+# 同一任務內分段並行轉錄數(成本不變,只影響速度;每段約 30-60 秒一個請求,
+# 6 路 ≈ 每分鐘 6-12 個請求,遠低於 OpenAI 速率限制)
+try:
+    CHUNK_WORKERS = max(1, int(os.environ.get("CHUNK_WORKERS", "6")))
+except ValueError:
+    CHUNK_WORKERS = 6
 JOBS_PER_HOUR_PER_USER = 40   # 每使用者每小時建立任務上限(防濫用)
 # ---- 背景任務佇列(資料庫佇列 + 就地 Worker;Render 免費方案無獨立 Worker 服務)----
 try:
@@ -1180,18 +1203,15 @@ def _relay_info(url: str) -> dict:
     raise last_exc
 
 
-def _transcode_and_segment(src: str, tmpdir: str) -> list:
-    """轉 16k 單聲道後,依 CHUNK_SEC 切段,回傳依序的段檔清單"""
-    conv = os.path.join(tmpdir, "conv.m4a")
-    subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", src,
-         "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", conv],
-        check=True, timeout=1800, capture_output=True,
-    )
+def _transcode_and_segment(src: str, tmpdir: str, normalized: bool = False) -> list:
+    """依 CHUNK_SEC 切段,回傳依序的段檔清單;單一 ffmpeg 完成。
+    normalized=True:來源已是 16k 單聲道 32k m4a(家用中繼輸出)→ 純封裝切段(-c copy,
+    幾秒完成);False:上傳檔格式不一 → 編碼與切段合併一趟(不再先整檔轉完才切)。"""
+    codec = ["-c", "copy"] if normalized else ["-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k"]
     pat = os.path.join(tmpdir, "seg_%04d.m4a")
     subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", conv,
-         "-f", "segment", "-segment_time", str(CHUNK_SEC), "-c", "copy", pat],
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", src, *codec,
+         "-f", "segment", "-segment_time", str(CHUNK_SEC), pat],
         check=True, timeout=1800, capture_output=True,
     )
     return sorted(glob.glob(os.path.join(tmpdir, "seg_*.m4a")))
@@ -1264,8 +1284,27 @@ def _process_job(job_id, uid, jobrow, api_key):
         ck()
 
         duration = jobrow.get("duration_seconds") or _ffprobe_seconds(src)
-        _job_set(job_id, stage="轉檔切段中", progress=40)
-        segs = _transcode_and_segment(src, tmpdir)
+        if jobrow.get("source_type") == "youtube":
+            # 中繼已輸出 16k 單聲道 32k:純封裝切段(-c copy),幾秒完成
+            _job_set(job_id, stage="轉檔切段中", progress=39)
+            segs = _transcode_and_segment(src, tmpdir, normalized=True)
+        else:
+            # 上傳檔需整檔編碼(時間隨長度):上傳沒有取音訊階段,把 1–38% 帶
+            # 讓給轉檔,用估算 ticker 持續推進(同取音訊的作法)
+            _job_set(job_id, stage="轉檔切段中", progress=1)
+            conv_est = max(10.0, min(float(duration) * 0.05, 600.0))
+            conv_done = threading.Event()
+
+            def conv_ticker():
+                t0 = time.time()
+                while not conv_done.wait(2):
+                    frac = min(0.97, (time.time() - t0) / conv_est)
+                    _job_set(job_id, stage="轉檔切段中", progress=max(1, int(frac * 38)))
+            threading.Thread(target=conv_ticker, daemon=True).start()
+            try:
+                segs = _transcode_and_segment(src, tmpdir)
+            finally:
+                conv_done.set()
         n = len(segs)
         if n == 0:
             raise RuntimeError("切段失敗,沒有可轉錄的音訊")
@@ -1301,10 +1340,14 @@ def _process_job(job_id, uid, jobrow, api_key):
 
         cu = None
         if jobrow.get("correction_requested") and full:
-            _job_set(job_id, stage="校正中", progress=97)
+            _job_set(job_id, stage="校正中", progress=95)
             cu = {}
+
+            def corr_prog(done_n, total_n):
+                # 校正是真實進度,配置在 95–99% 帶區
+                _job_set(job_id, stage="校正中", progress=95 + int(done_n * 4 / max(1, total_n)))
             try:
-                full = _gpt_correct(full, api_key, usage=cu)
+                full = _gpt_correct(full, api_key, usage=cu, on_progress=corr_prog)
             except Exception:
                 cu = None   # 校正失敗 → 退回未校正原文,不計校正成本、不讓整筆失敗
         ck()
