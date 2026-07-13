@@ -12,12 +12,18 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
+      # 原始檔案大小上限 MB(上傳檔 / YouTube 原始音訊;未設用預設 500)。
+      # 系統會先壓縮再切段,長度不受此限;檔案越大 Render 磁碟/上傳負擔越大。
+      - key: MAX_UPLOAD_MB
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       # 階段三:家用中繼 ngrok 網址,供付費版 YouTube 下載(住宅 IP);
-      # 未設定則 YouTube 來源停用,上傳仍可用
+      # 未設定則 YouTube 來源停用,上傳仍可用。
+      # 可填多個(逗號分隔)做備援/分流:後端依序嘗試,某台關機/失敗自動換下一台;
+      # 多台須共用同一 RELAY_SHARED_SECRET。
       - key: HOME_RELAY_URL
         sync: false
       # 階段五:每日免費額度(分鐘);未設定或 0 = 關閉免費試用

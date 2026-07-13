@@ -278,7 +278,7 @@ window.ADS = {
       <div id="paneFile">
         <div class="drop" id="drop">
           <b>點此選擇</b> 或拖曳音檔到這裡
-          <small>MP3 / M4A / WAV / MP4… · 單檔 ≤ <span class="minTxt">10</span> 分鐘、100 MB</small>
+          <small>MP3 / M4A / WAV / MP4… · 單檔 ≤ <span class="minTxt">10</span> 分鐘、500 MB</small>
         </div>
         <input type="file" id="fileInput" accept=".mp3,.m4a,.wav,.mp4,.webm,.aac,.flac,.ogg,.mpeg,.mpga,audio/*,video/*" hidden>
         <div class="filename hidden" id="fileName"></div>
@@ -437,9 +437,9 @@ window.ADS = {
     fileBlocked=false;precheckPending=false;setPre('');
     if(!f){hide('fileName');return;}
     $('fileName').textContent='已選擇:'+f.name;show('fileName');
-    if(f.size>100*1024*1024){
+    if(f.size>500*1024*1024){
       fileBlocked=true;
-      setPre('檔案超過 100 MB 上限,請壓縮或截短後再試。','err');
+      setPre('檔案超過 500 MB 上限,請壓縮或截短後再試。','err');
       return;
     }
     /* 用瀏覽器讀時長,超過試用上限立即提示,免得整檔上傳完才被拒 */

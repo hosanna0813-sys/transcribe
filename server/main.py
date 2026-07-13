@@ -11,6 +11,7 @@ OpenAI API Key 走 Whisper 轉錄。
 
 import hmac
 import ipaddress
+import itertools
 import os
 import re
 import glob
@@ -31,7 +32,13 @@ from starlette.background import BackgroundTask
 
 MAX_VIDEO_SEC = 3 * 3600      # 影片長度上限 3 小時
 MAX_CLIP_SEC = 2 * 3600       # 單段截取上限 2 小時
-MAX_FILE_BYTES = 100 * 1024 * 1024  # 暫存檔大小上限 100 MB
+# 原始檔案大小上限(上傳檔 / YouTube 原始音訊)。可用 MAX_UPLOAD_MB 覆蓋(預設 500 MB);
+# 系統會先壓縮再切段,長度不受此限,此值只擋「原始檔案大小」。
+try:
+    _MAX_FILE_MB = max(1, int(os.environ.get("MAX_UPLOAD_MB", "500")))
+except ValueError:
+    _MAX_FILE_MB = 500
+MAX_FILE_BYTES = _MAX_FILE_MB * 1024 * 1024
 YT_URL_RE = re.compile(
     r"^https?://(www\.|m\.|music\.)?(youtube\.com/(watch|shorts|live)|youtu\.be/)", re.I
 )
@@ -481,10 +488,10 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
 
     srcs = glob.glob(os.path.join(tmpdir, "src.*"))
     if not srcs:
-        raise HTTPException(502, "下載音訊失敗:音訊可能超過 100 MB 上限,請用起訖時間縮短範圍")
+        raise HTTPException(502, f"下載音訊失敗:音訊可能超過 {_MAX_FILE_MB} MB 上限,請用起訖時間縮短範圍")
     src = srcs[0]
     if os.path.getsize(src) > MAX_FILE_BYTES:
-        raise HTTPException(413, "音訊超過 100 MB 上限,請用起訖時間縮短範圍")
+        raise HTTPException(413, f"音訊超過 {_MAX_FILE_MB} MB 上限,請用起訖時間縮短範圍")
 
     # 轉成 16kHz 單聲道 32kbps AAC;若片段下載失敗改抓了全片,就在這裡用 -ss/-t 截取
     out = os.path.join(tmpdir, "audio.m4a")
@@ -505,7 +512,7 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
     os.remove(src)  # 轉檔完成即刪來源檔,同一時間只留最小輸出檔
 
     if os.path.getsize(out) > MAX_FILE_BYTES:
-        raise HTTPException(413, "音訊超過 100 MB 上限,請用起訖時間縮短範圍")
+        raise HTTPException(413, f"音訊超過 {_MAX_FILE_MB} MB 上限,請用起訖時間縮短範圍")
 
     return out
 
@@ -923,7 +930,7 @@ def api_transcribe(
                     break
                 size += len(chunk)
                 if size > MAX_FILE_BYTES:
-                    raise HTTPException(413, "檔案超過 100 MB 上限")
+                    raise HTTPException(413, f"檔案超過 {_MAX_FILE_MB} MB 上限")
                 out.write(chunk)
         if size == 0:
             raise HTTPException(400, "沒有收到音檔")
@@ -1065,11 +1072,34 @@ def _relay_download_caps():
     return max_bytes, max_sec
 
 
+def _rm_quietly(path: str) -> None:
+    """刪除半成品檔,忽略不存在等錯誤"""
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+_relay_rr = itertools.count()             # 多中繼輪替起點(輕度分流用)
+
+
+def _relay_urls() -> list:
+    """家用中繼網址清單。HOME_RELAY_URL 可填多個(逗號分隔)做備援/分流;
+    單一網址完全向下相容。多台時輪替起點,連續兩筆任務偏好不同台(輕度分流)。"""
+    raw = os.environ.get("HOME_RELAY_URL") or ""
+    urls = [u.strip().rstrip("/") for u in raw.split(",") if u.strip()]
+    if len(urls) > 1:
+        k = next(_relay_rr) % len(urls)
+        urls = urls[k:] + urls[:k]
+    return urls
+
+
 def _relay_fetch_audio(url: str, start, end, dest: str) -> None:
     """向家用中繼 /audio 取回(已截取、已轉檔的)m4a,住宅 IP 負責下載。
-    對外附 HMAC 簽章(中繼端驗證);分塊下載並限制總大小與總時間。"""
-    relay = (os.environ.get("HOME_RELAY_URL") or "").rstrip("/")
-    if not relay:
+    對外附 HMAC 簽章(中繼端驗證);分塊下載並限制總大小與總時間。
+    設多台中繼時依序嘗試,某台關機/下載失敗自動改用下一台。"""
+    relays = _relay_urls()
+    if not relays:
         raise HTTPException(503, "YouTube 來源尚未啟用(伺服器未設定家用中繼網址)")
     query = {"url": url}
     if start is not None:
@@ -1077,65 +1107,77 @@ def _relay_fetch_audio(url: str, start, end, dest: str) -> None:
     if end is not None:
         query["end"] = str(end)
     q = "/audio?" + "&".join(f"{k}={urllib.parse.quote(v, safe='')}" for k, v in query.items())
-    # 簽章用「未編碼值」的正規化字串,中繼端以 query_params(已解碼)重算
-    headers = {"ngrok-skip-browser-warning": "1"}
-    headers.update(_relay_sign_headers("GET", "/audio", query))
-    req = urllib.request.Request(relay + q, headers=headers)
     max_bytes, max_sec = _relay_download_caps()
-    deadline = time.time() + max_sec
-    got = 0
-    try:
-        with urllib.request.urlopen(req, timeout=1800) as r, open(dest, "wb") as f:
-            while True:
-                if time.time() > deadline:
-                    raise HTTPException(504, "YouTube 下載逾時,請改截取較短片段")
-                chunk = r.read(1024 * 256)
-                if not chunk:
-                    break
-                got += len(chunk)
-                if got > max_bytes:
-                    raise HTTPException(413, "下載內容超過大小上限,請改截取較短片段")
-                f.write(chunk)
-    except HTTPException:
+    last_exc = None
+    for relay in relays:
+        # 簽章用「未編碼值」的正規化字串,中繼端以 query_params(已解碼)重算;
+        # 每台各自重簽(timestamp/nonce 皆為新的)
+        headers = {"ngrok-skip-browser-warning": "1"}
+        headers.update(_relay_sign_headers("GET", "/audio", query))
+        req = urllib.request.Request(relay + q, headers=headers)
+        deadline = time.time() + max_sec
+        got = 0
         try:
-            os.remove(dest)
-        except OSError:
-            pass
-        raise
-    except urllib.error.HTTPError as e:
-        detail = (e.read() or b"").decode(errors="ignore")[:200]
-        raise HTTPException(502, f"YouTube 下載失敗:{detail}")
-    except Exception as e:
-        raise HTTPException(502, f"YouTube 下載連線失敗(家用電腦是否開著?):{str(e)[:120]}")
+            with urllib.request.urlopen(req, timeout=1800) as r, open(dest, "wb") as f:
+                while True:
+                    if time.time() > deadline:
+                        raise HTTPException(504, "YouTube 下載逾時,請改截取較短片段")
+                    chunk = r.read(1024 * 256)
+                    if not chunk:
+                        break
+                    got += len(chunk)
+                    if got > max_bytes:
+                        raise HTTPException(413, "下載內容超過大小上限,請改截取較短片段")
+                    f.write(chunk)
+            return                              # 成功
+        except HTTPException as e:
+            _rm_quietly(dest)
+            if e.status_code == 413:            # 內容超過上限,各台結果相同,不必再試
+                raise
+            last_exc = e                        # 504 逾時等 → 換下一台
+        except urllib.error.HTTPError as e:
+            _rm_quietly(dest)
+            detail = (e.read() or b"").decode(errors="ignore")[:200]
+            last_exc = HTTPException(502, f"YouTube 下載失敗:{detail}")
+        except Exception as e:
+            _rm_quietly(dest)
+            last_exc = HTTPException(502, f"YouTube 下載連線失敗(家用電腦是否開著?):{str(e)[:120]}")
+    raise last_exc
 
 
 def _relay_info(url: str) -> dict:
     """向家用中繼 /info 取影片資訊(住宅 IP,避開機房被 YouTube 擋);回 JSON(含 duration)。
-    絕不在 Render 端 probe YouTube —— 那會被機器人驗證擋下。"""
-    relay = (os.environ.get("HOME_RELAY_URL") or "").rstrip("/")
-    if not relay:
+    絕不在 Render 端 probe YouTube —— 那會被機器人驗證擋下。
+    設多台中繼時依序嘗試:某台關機/被 bot 擋(502)/未啟用(503)自動改用下一台;
+    400(影片本身問題,各台結果相同)則立即拋出。"""
+    relays = _relay_urls()
+    if not relays:
         raise HTTPException(503, "YouTube 來源尚未啟用(伺服器未設定家用中繼網址)")
     query = {"url": url}
     q = "/info?url=" + urllib.parse.quote(url, safe="")
-    headers = {"ngrok-skip-browser-warning": "1"}
-    headers.update(_relay_sign_headers("GET", "/info", query))
-    req = urllib.request.Request(relay + q, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return json.loads(r.read().decode() or "{}")
-    except urllib.error.HTTPError as e:
-        body = (e.read() or b"").decode(errors="ignore")
+    last_exc = None
+    for relay in relays:
+        headers = {"ngrok-skip-browser-warning": "1"}
+        headers.update(_relay_sign_headers("GET", "/info", query))
+        req = urllib.request.Request(relay + q, headers=headers)
         try:
-            detail = json.loads(body).get("detail") or body
-        except Exception:
-            detail = body
-        # 原樣傳遞中繼的語意狀態(400 影片問題 / 502 bot / 503 未啟用),其餘視為 502
-        code = e.code if e.code in (400, 502, 503) else 502
-        raise HTTPException(code, str(detail)[:200] or "YouTube 讀取失敗")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(502, f"YouTube 資訊讀取連線失敗(家用電腦是否開著?):{str(e)[:120]}")
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(r.read().decode() or "{}")
+        except urllib.error.HTTPError as e:
+            body = (e.read() or b"").decode(errors="ignore")
+            try:
+                detail = json.loads(body).get("detail") or body
+            except Exception:
+                detail = body
+            # 原樣傳遞中繼的語意狀態(400 影片問題 / 502 bot / 503 未啟用),其餘視為 502
+            code = e.code if e.code in (400, 502, 503) else 502
+            exc = HTTPException(code, str(detail)[:200] or "YouTube 讀取失敗")
+            if code == 400:                 # 影片本身問題,換台也一樣 → 立即拋
+                raise exc
+            last_exc = exc                  # 502/503 → 換下一台
+        except Exception as e:
+            last_exc = HTTPException(502, f"YouTube 資訊讀取連線失敗(家用電腦是否開著?):{str(e)[:120]}")
+    raise last_exc
 
 
 def _transcode_and_segment(src: str, tmpdir: str) -> list:
@@ -1391,7 +1433,7 @@ def api_create_job(
                         break
                     size += len(chunk)
                     if size > MAX_FILE_BYTES:
-                        raise HTTPException(413, "檔案超過 100 MB 上限")
+                        raise HTTPException(413, f"檔案超過 {_MAX_FILE_MB} MB 上限")
                     out.write(chunk)
             if size == 0:
                 raise HTTPException(400, "沒有收到音檔")
@@ -1841,7 +1883,7 @@ def _content_length_precheck(request: Request) -> None:
     if cl:
         try:
             if int(cl) > MAX_FILE_BYTES + 1024 * 1024:   # multipart 邊界的緩衝
-                raise HTTPException(413, "檔案超過 100 MB 上限")
+                raise HTTPException(413, f"檔案超過 {_MAX_FILE_MB} MB 上限")
         except ValueError:
             pass
 
@@ -1898,7 +1940,7 @@ def api_trial(
                         break
                     size += len(chunk)
                     if size > MAX_FILE_BYTES:
-                        raise HTTPException(413, "檔案超過 100 MB 上限")
+                        raise HTTPException(413, f"檔案超過 {_MAX_FILE_MB} MB 上限")
                     out.write(chunk)
             if size == 0:
                 raise HTTPException(400, "沒有收到音檔")
