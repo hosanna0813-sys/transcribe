@@ -12,6 +12,10 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
+      # 原始檔案大小上限 MB(上傳檔 / YouTube 原始音訊;未設用預設 500)。
+      # 系統會先壓縮再切段,長度不受此限;檔案越大 Render 磁碟/上傳負擔越大。
+      - key: MAX_UPLOAD_MB
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

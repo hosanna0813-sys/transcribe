@@ -32,7 +32,13 @@ from starlette.background import BackgroundTask
 
 MAX_VIDEO_SEC = 3 * 3600      # 影片長度上限 3 小時
 MAX_CLIP_SEC = 2 * 3600       # 單段截取上限 2 小時
-MAX_FILE_BYTES = 100 * 1024 * 1024  # 暫存檔大小上限 100 MB
+# 原始檔案大小上限(上傳檔 / YouTube 原始音訊)。可用 MAX_UPLOAD_MB 覆蓋(預設 500 MB);
+# 系統會先壓縮再切段,長度不受此限,此值只擋「原始檔案大小」。
+try:
+    _MAX_FILE_MB = max(1, int(os.environ.get("MAX_UPLOAD_MB", "500")))
+except ValueError:
+    _MAX_FILE_MB = 500
+MAX_FILE_BYTES = _MAX_FILE_MB * 1024 * 1024
 YT_URL_RE = re.compile(
     r"^https?://(www\.|m\.|music\.)?(youtube\.com/(watch|shorts|live)|youtu\.be/)", re.I
 )
@@ -482,10 +488,10 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
 
     srcs = glob.glob(os.path.join(tmpdir, "src.*"))
     if not srcs:
-        raise HTTPException(502, "下載音訊失敗:音訊可能超過 100 MB 上限,請用起訖時間縮短範圍")
+        raise HTTPException(502, f"下載音訊失敗:音訊可能超過 {_MAX_FILE_MB} MB 上限,請用起訖時間縮短範圍")
     src = srcs[0]
     if os.path.getsize(src) > MAX_FILE_BYTES:
-        raise HTTPException(413, "音訊超過 100 MB 上限,請用起訖時間縮短範圍")
+        raise HTTPException(413, f"音訊超過 {_MAX_FILE_MB} MB 上限,請用起訖時間縮短範圍")
 
     # 轉成 16kHz 單聲道 32kbps AAC;若片段下載失敗改抓了全片,就在這裡用 -ss/-t 截取
     out = os.path.join(tmpdir, "audio.m4a")
@@ -506,7 +512,7 @@ def _fetch_and_transcode(url: str, tmpdir: str, start: float | None, end: float 
     os.remove(src)  # 轉檔完成即刪來源檔,同一時間只留最小輸出檔
 
     if os.path.getsize(out) > MAX_FILE_BYTES:
-        raise HTTPException(413, "音訊超過 100 MB 上限,請用起訖時間縮短範圍")
+        raise HTTPException(413, f"音訊超過 {_MAX_FILE_MB} MB 上限,請用起訖時間縮短範圍")
 
     return out
 
@@ -924,7 +930,7 @@ def api_transcribe(
                     break
                 size += len(chunk)
                 if size > MAX_FILE_BYTES:
-                    raise HTTPException(413, "檔案超過 100 MB 上限")
+                    raise HTTPException(413, f"檔案超過 {_MAX_FILE_MB} MB 上限")
                 out.write(chunk)
         if size == 0:
             raise HTTPException(400, "沒有收到音檔")
@@ -1427,7 +1433,7 @@ def api_create_job(
                         break
                     size += len(chunk)
                     if size > MAX_FILE_BYTES:
-                        raise HTTPException(413, "檔案超過 100 MB 上限")
+                        raise HTTPException(413, f"檔案超過 {_MAX_FILE_MB} MB 上限")
                     out.write(chunk)
             if size == 0:
                 raise HTTPException(400, "沒有收到音檔")
@@ -1877,7 +1883,7 @@ def _content_length_precheck(request: Request) -> None:
     if cl:
         try:
             if int(cl) > MAX_FILE_BYTES + 1024 * 1024:   # multipart 邊界的緩衝
-                raise HTTPException(413, "檔案超過 100 MB 上限")
+                raise HTTPException(413, f"檔案超過 {_MAX_FILE_MB} MB 上限")
         except ValueError:
             pass
 
@@ -1934,7 +1940,7 @@ def api_trial(
                         break
                     size += len(chunk)
                     if size > MAX_FILE_BYTES:
-                        raise HTTPException(413, "檔案超過 100 MB 上限")
+                        raise HTTPException(413, f"檔案超過 {_MAX_FILE_MB} MB 上限")
                     out.write(chunk)
             if size == 0:
                 raise HTTPException(400, "沒有收到音檔")
