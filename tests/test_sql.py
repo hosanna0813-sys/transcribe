@@ -13,7 +13,7 @@ if not DB:
 SCHEMA_FILES = ["schema.sql", "schema_phase2.sql", "schema_phase3.sql",
                 "schema_phase4.sql", "schema_phase5.sql", "schema_history.sql",
                 "schema_pay.sql", "schema_phase6.sql", "schema_phase7.sql",
-                "schema_phase8.sql"]
+                "schema_phase8.sql", "schema_phase9.sql"]
 V2 = os.path.join(os.path.dirname(__file__), "..", "v2")
 
 STUB = """

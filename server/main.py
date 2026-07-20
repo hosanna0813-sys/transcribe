@@ -1333,23 +1333,31 @@ def _process_job(job_id, uid, jobrow, api_key):
             raise errs[0]
         ck()
 
+        opts = jobrow.get("options") or {}   # phase9 前的舊任務無此欄 → 全預設
+        use_ts = bool(opts.get("timestamps", True))
         parts = []
         for i, t in enumerate(texts):
-            parts.append((_fmt_hms(i * CHUNK_SEC) + " " + (t or "")).strip())
+            prefix = (_fmt_hms(i * CHUNK_SEC) + " ") if use_ts else ""
+            parts.append((prefix + (t or "")).strip())
         full = "\n\n".join(parts).strip()
 
         cu = None
         if jobrow.get("correction_requested") and full:
-            _job_set(job_id, stage="校正中", progress=95)
+            # 原始版留在記憶體供前端「校正版/原始版」切換(實例重啟後僅剩最終版)
+            _job_set(job_id, stage="校正中", progress=95, raw=full)
             cu = {}
 
             def corr_prog(done_n, total_n):
                 # 校正是真實進度,配置在 95–99% 帶區
                 _job_set(job_id, stage="校正中", progress=95 + int(done_n * 4 / max(1, total_n)))
             try:
-                full = _gpt_correct(full, api_key, usage=cu, on_progress=corr_prog)
+                full = _gpt_correct(full, api_key,
+                                    remove_fillers=bool(opts.get("remove_fillers")),
+                                    speakers=bool(opts.get("speakers")),
+                                    usage=cu, on_progress=corr_prog)
             except Exception:
                 cu = None   # 校正失敗 → 退回未校正原文,不計校正成本、不讓整筆失敗
+                _job_set(job_id, raw=None)   # 校正版=原始版,前端不需切換分頁
         ck()
 
         cost, pt, ct = _settle_cost(duration, cu)
@@ -1426,6 +1434,9 @@ def api_create_job(
     start: float | None = Form(None),
     end: float | None = Form(None),
     correct: bool = Form(False),
+    timestamps: bool = Form(True),
+    remove_fillers: bool = Form(False),
+    speakers: bool = Form(False),
     authorization: str | None = Header(None),
 ):
     api_key, supabase_url, service_key = _paid_env()
@@ -1490,15 +1501,27 @@ def api_create_job(
             raise HTTPException(400, "請提供音檔或 YouTube 網址")
 
         cost = int(math.ceil(duration))
+        payload = {
+            "p_user_id": uid, "p_cost": cost,
+            "p_source_type": source_type, "p_source_name": source_name, "p_duration": cost,
+            "p_free_limit": _free_daily_credits(),
+            "p_youtube_url": youtube_url if source_type == "youtube" else None,
+            "p_start": yt_start, "p_end": yt_end,
+            "p_upload_path": upload_path, "p_correct": bool(correct),
+            "p_options": {"timestamps": bool(timestamps),
+                          "remove_fillers": bool(remove_fillers), "speakers": bool(speakers)},
+        }
         try:
-            res = _sb_rpc("enqueue_transcription", {
-                "p_user_id": uid, "p_cost": cost,
-                "p_source_type": source_type, "p_source_name": source_name, "p_duration": cost,
-                "p_free_limit": _free_daily_credits(),
-                "p_youtube_url": youtube_url if source_type == "youtube" else None,
-                "p_start": yt_start, "p_end": yt_end,
-                "p_upload_path": upload_path, "p_correct": bool(correct),
-            })
+            try:
+                res = _sb_rpc("enqueue_transcription", payload)
+            except HTTPException as e:
+                # 尚未套用 schema_phase9(無 p_options 簽名)→ 退回舊簽名重試一次,
+                # 選項採預設行為(時間戳開、無去贅詞/講者),不擋任務
+                if "PGRST202" in str(getattr(e, "detail", "")):
+                    res = _sb_rpc("enqueue_transcription",
+                                  {k: v for k, v in payload.items() if k != "p_options"})
+                else:
+                    raise
         except HTTPException as e:
             # migration(schema_phase8)尚未套用時 RPC 不存在 → 給明確訊息(短音檔仍可用)
             if "PGRST202" in str(getattr(e, "detail", "")) or "enqueue_transcription" in str(getattr(e, "detail", "")):
@@ -1556,6 +1579,7 @@ def api_job_status(job_id: str, authorization: str | None = Header(None)):
                 pass
             rem = j.get("remaining") or 0
             return {"status": "done", "progress": 100, "text": j.get("text", ""),
+                    "raw": j.get("raw"),   # 校正前原始版(僅本實例記憶體有;無校正時為 null)
                     "remaining_credits": rem, "remaining_minutes": int(rem) // 60}
         if st == "failed":
             with _v3_lock:
