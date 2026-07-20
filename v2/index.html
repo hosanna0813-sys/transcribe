@@ -32,7 +32,7 @@
     background:var(--bg);color:var(--ink);min-height:100vh;
     padding:28px 16px 64px;line-height:1.6;transition:background .25s,color .25s;
   }
-  .wrap{max-width:560px;margin:0 auto}
+  .wrap{max-width:680px;margin:0 auto}
   .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;gap:12px}
   .brand{display:flex;align-items:center;gap:12px;min-width:0}
   .logo{
@@ -43,6 +43,13 @@
   .logo svg{width:22px;height:22px}
   .brand h1{font-size:1.25rem;font-weight:700;letter-spacing:.04em;line-height:1.3}
   .brand p{font-size:.78rem;color:var(--muted)}
+  .top-actions{display:flex;align-items:center;gap:8px;flex:none}
+  .btn-back{
+    padding:8px 14px;border:1px solid var(--line);border-radius:999px;
+    background:var(--card);color:var(--ink);font-size:.82rem;font-weight:500;
+    text-decoration:none;white-space:nowrap;
+  }
+  .btn-back:hover{border-color:var(--accent);color:var(--accent)}
   #modeBtn{
     width:38px;height:38px;flex:none;border-radius:50%;border:1px solid var(--line);
     background:var(--card);cursor:pointer;font-size:1rem;line-height:1;
@@ -57,11 +64,11 @@
   .step-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
   .step-head h2{font-size:1rem;font-weight:700;letter-spacing:.03em}
   label.field{display:block;font-size:.8rem;color:var(--muted);margin-bottom:5px}
-  input[type=email],input[type=text],input[type=number]{
+  input[type=email],input[type=text],input[type=url],input[type=number]{
     width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:var(--radius-s);
     font-family:inherit;font-size:.92rem;color:var(--ink);background:var(--card);
   }
-  input:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
+  input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
   ::placeholder{color:var(--muted);opacity:.7}
   .primary{
     width:100%;padding:13px;border:none;border-radius:var(--radius-s);margin-top:12px;
@@ -86,20 +93,49 @@
   .balance .unit{font-size:1rem;color:var(--muted)}
   .acct-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
   .acct-row .who{font-size:.86rem;color:var(--muted);word-break:break-all;min-width:0}
-  input[type=file]{
-    width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:var(--radius-s);
-    font-family:inherit;font-size:.86rem;color:var(--ink);background:var(--card);cursor:pointer;
+
+  /* ---------- 來源分頁 / 拖放 / 預檢(與首頁一致) ---------- */
+  .tabs{display:flex;gap:6px;margin-bottom:16px;background:var(--bg);padding:4px;border-radius:var(--radius-s);border:1px solid var(--line)}
+  .tab{
+    flex:1;padding:9px;border:none;background:transparent;color:var(--muted);
+    font-family:inherit;font-size:.86rem;font-weight:500;border-radius:7px;cursor:pointer;
   }
-  input[type=file]::file-selector-button{
-    font-family:inherit;font-size:.82rem;margin-right:10px;padding:6px 12px;cursor:pointer;
-    border:1px solid var(--line);border-radius:var(--radius-s);background:var(--bg);color:var(--ink);
+  .tab.on{background:var(--card);color:var(--accent);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  .drop{
+    border:1.5px dashed var(--line);border-radius:var(--radius-s);
+    padding:28px 16px;text-align:center;cursor:pointer;transition:.15s;
+    color:var(--muted);font-size:.9rem;line-height:1.8;background:var(--bg);
   }
-  .opt-row{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:.84rem;cursor:pointer;line-height:1.5}
-  .opt-row input{margin-top:3px;accent-color:var(--accent);width:15px;height:15px;flex:none}
-  .or-sep{text-align:center;color:var(--muted);font-size:.78rem;margin:12px 0 8px;position:relative}
-  .trim2{display:flex;gap:12px;margin-top:8px;flex-wrap:wrap}
-  .trim2 label{display:flex;align-items:center;gap:6px;font-size:.76rem;color:var(--muted);margin:0}
-  .trim2 input{width:96px;padding:7px 9px;font-size:.85rem}
+  .drop:hover,.drop.over{border-color:var(--accent);color:var(--ink);background:var(--accent-soft)}
+  .drop b{color:var(--accent);font-weight:500}
+  .drop small{font-size:.76rem;display:block;margin-top:2px}
+  .filename{margin-top:10px;font-size:.85rem;color:var(--ink);word-break:break-all}
+  .precheck{font-size:.78rem;margin-top:8px;display:none}
+  .precheck.show{display:block}
+  .precheck.err{color:var(--err)}
+  .precheck.ok{color:var(--muted)}
+
+  /* ---------- YouTube 預覽(與首頁一致) ---------- */
+  .yt-preview{margin-top:14px}
+  .yt-frame{border-radius:var(--radius-s);overflow:hidden;background:#000;aspect-ratio:16/9;position:relative}
+  .yt-frame iframe{width:100%;height:100%;border:0;display:block}
+  .yt-loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:.82rem}
+  .yt-actions{display:flex;gap:8px;margin-top:8px}
+  .yt-mark{
+    padding:7px 14px;border:1px solid var(--line);border-radius:7px;background:var(--card);
+    color:var(--muted);font-family:inherit;font-size:.8rem;cursor:pointer;
+  }
+  .yt-mark:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+  .yt-mark:disabled{opacity:.4;cursor:default}
+  .trim-row{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+  .trim-row>div{flex:1;min-width:120px}
+  .trim-row input{width:100%}
+
+  /* ---------- 選項(與首頁一致) ---------- */
+  .check{display:flex;align-items:flex-start;gap:9px;font-size:.88rem;cursor:pointer;line-height:1.5;margin-top:14px}
+  .check input{margin-top:4px;accent-color:var(--accent);width:15px;height:15px;flex:none}
+  .check small{display:block;color:var(--muted);font-size:.76rem}
+
   #progBox{margin-top:14px}
   #progBox.hidden{display:none}
   .bar2{height:8px;background:var(--line);border-radius:99px;overflow:hidden}
@@ -123,12 +159,26 @@
   .hist .h-st.run{background:var(--accent-soft);color:var(--accent)}
   .hist .h-del{border:none;background:none;color:var(--muted);text-decoration:underline;cursor:pointer;font-size:.72rem;font-family:inherit;padding:0;margin-top:5px}
   .hist .h-del:hover{color:var(--err)}
+
+  /* ---------- 結果(與首頁一致:可編輯 + 版本分頁 + 下載) ---------- */
   .result{margin-top:14px}
   .result.hidden{display:none}
-  .result-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;font-size:.85rem;font-weight:500}
+  .result-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;font-size:.85rem;font-weight:500}
+  .result-actions{display:flex;gap:6px;flex-wrap:wrap}
+  .result-actions button{
+    border:1px solid var(--line);background:var(--card);color:var(--muted);
+    padding:6px 12px;font-size:.78rem;border-radius:7px;cursor:pointer;font-family:inherit;
+  }
+  .result-actions button:hover{border-color:var(--accent);color:var(--accent)}
+  .rtabs{display:flex;gap:6px;margin-bottom:10px}
+  .rtab{
+    padding:6px 14px;border:1px solid var(--line);border-radius:999px;background:var(--card);
+    color:var(--muted);font-family:inherit;font-size:.78rem;cursor:pointer;
+  }
+  .rtab.on{border-color:var(--accent);color:var(--accent);background:var(--accent-soft);font-weight:700}
   #resultText{
-    width:100%;min-height:160px;padding:12px;border:1px solid var(--line);border-radius:var(--radius-s);
-    font-family:inherit;font-size:.9rem;line-height:1.9;color:var(--ink);background:var(--card);resize:vertical;
+    width:100%;min-height:200px;padding:12px;border:1px solid var(--line);border-radius:var(--radius-s);
+    font-family:inherit;font-size:.9rem;line-height:1.9;color:var(--ink);background:var(--bg);resize:vertical;
   }
   .foot-note{font-size:.76rem;color:var(--muted);margin-top:20px;text-align:center;line-height:1.7}
   .foot-note a{color:var(--accent);text-decoration:none}
@@ -145,7 +195,10 @@
           <p>計費版 · 預付分鐘數</p>
         </div>
       </div>
-      <button id="modeBtn" title="切換深色/淺色" aria-label="切換深色/淺色">🌙</button>
+      <div class="top-actions">
+        <a class="btn-back" href="../">← 免費版</a>
+        <button id="modeBtn" title="切換深色/淺色" aria-label="切換深色/淺色">🌙</button>
+      </div>
     </div>
 
     <div class="card hidden" id="configCard">
@@ -188,32 +241,72 @@
           <div class="who">已登入:<span id="userEmail"></span></div>
           <button class="ghost" id="logoutBtn">登出</button>
         </div>
-      </section>
-      <section>
-        <div class="step-head"><h2>剩餘額度</h2></div>
         <div class="balance"><span class="num" id="minNum">–</span><span class="unit">分鐘</span></div>
         <p class="hint" id="creditLine"></p>
         <p class="hint hidden" id="freeLine"></p>
       </section>
-      <section id="topupSection" class="hidden">
-        <div class="step-head"><h2>儲值</h2></div>
-        <div id="payMsg"></div>
-        <div id="pkgList" class="pkgs"></div>
-        <p class="hint">線上刷卡 / LINE Pay 付款,額度自動入帳(付款完成後約數秒到帳)。</p>
-      </section>
+
+      <!-- 轉錄(置頂:登入後最常用) -->
       <section>
-        <div class="step-head"><h2>轉錄(上傳檔案或 YouTube)</h2></div>
-        <label class="field" for="audioFile">上傳音檔或影片檔(影片會自動抽取聲音,檔案上限 500 MB)</label>
-        <input type="file" id="audioFile">
-        <div class="or-sep">或</div>
-        <label class="field" for="ytUrl">貼上 YouTube 網址</label>
-        <input type="text" id="ytUrl" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
-        <div class="trim2">
-          <label>起點(選填)<input type="text" id="ytStart" placeholder="0:00" autocomplete="off"></label>
-          <label>終點(選填)<input type="text" id="ytEnd" placeholder="到結尾" autocomplete="off"></label>
+        <div class="step-head"><h2>開始轉錄</h2></div>
+
+        <div class="tabs">
+          <button class="tab on" id="tabFile" type="button">上傳音檔</button>
+          <button class="tab" id="tabYt" type="button">YouTube</button>
         </div>
-        <label class="opt-row"><input type="checkbox" id="optCorrect" checked>
-          <span>轉錄後用 AI 校正逐字稿(修正錯字、標點;不額外收費)</span></label>
+
+        <!-- 檔案模式 -->
+        <div id="paneFile">
+          <div class="drop" id="drop">
+            <b>點此選擇</b> 或拖曳音檔到這裡
+            <small>MP3 / M4A / WAV / MP4… · 單檔 ≤ 3 小時、500 MB</small>
+          </div>
+          <input type="file" id="audioFile" accept=".mp3,.m4a,.wav,.mp4,.webm,.aac,.flac,.ogg,.mpeg,.mpga,audio/*,video/*" hidden>
+          <div class="filename hidden" id="fileName"></div>
+          <div class="precheck" id="precheck"></div>
+        </div>
+
+        <!-- YouTube 模式 -->
+        <div id="paneYt" class="hidden">
+          <label class="field" for="ytUrl">YouTube 網址</label>
+          <input type="url" id="ytUrl" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
+          <div class="yt-preview hidden" id="ytPreview">
+            <div class="yt-frame" id="ytFrame"><div class="yt-loading" id="ytLoading">載入播放器中…</div></div>
+            <div class="yt-actions">
+              <button type="button" class="yt-mark" id="markStart" disabled>設為起點</button>
+              <button type="button" class="yt-mark" id="markEnd" disabled>設為終點</button>
+            </div>
+          </div>
+          <div class="trim-row">
+            <div>
+              <label class="field" for="ytStart">起點(選填)</label>
+              <input type="text" id="ytStart" placeholder="例:1:30" autocomplete="off">
+            </div>
+            <div>
+              <label class="field" for="ytEnd">終點(選填)</label>
+              <input type="text" id="ytEnd" placeholder="例:11:00" autocomplete="off">
+            </div>
+          </div>
+          <p class="hint">播放到想要的位置按「設為起點/終點」,或手動填「秒」、「分:秒」、「時:分:秒」;不填則轉錄整部(最長 3 小時)。</p>
+        </div>
+
+        <label class="check">
+          <input type="checkbox" id="optCorrect" checked>
+          <span>AI 校正錯字與標點<small>用 AI 修飾逐字稿,讓內容更通順(建議開啟;不額外收費)</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="optTs" checked>
+          <span>加入時間軸<small>長音檔每段開頭標 [時:分:秒],方便對照原音</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="optFillers">
+          <span>刪除口頭贅詞<small>清除「嗯、啊、就是說、那個」等填充詞(需開啟 AI 校正)</small></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="optSpeakers">
+          <span>推測講者(實驗性)<small>AI 依語意標「甲:」「乙:」,僅適合兩人對話(需開啟 AI 校正)</small></span>
+        </label>
+
         <button class="primary" id="transcribeBtn">開始轉錄</button>
         <div id="transcribeMsg"></div>
         <div id="progBox" class="hidden">
@@ -224,12 +317,27 @@
         <div id="resultBox" class="result hidden">
           <div class="result-head">
             <span>轉錄結果</span>
-            <button class="ghost" id="copyBtn">複製</button>
+            <div class="result-actions">
+              <button id="copyBtn" type="button">複製</button>
+              <button id="wordBtn" type="button">下載 Word</button>
+              <button id="dlBtn" type="button">下載 .txt</button>
+            </div>
           </div>
-          <textarea id="resultText" readonly></textarea>
+          <div class="rtabs hidden" id="rtabs">
+            <button type="button" class="rtab on" id="tabFixed">校正版</button>
+            <button type="button" class="rtab" id="tabRaw">原始版</button>
+          </div>
+          <textarea id="resultText" placeholder="可直接在此編輯"></textarea>
         </div>
         <p class="hint">轉錄費用依音檔長度扣除(1 秒 = 1 credit;60 秒 = 1 分鐘),最長 3 小時。
         長音檔會自動分段處理,送出後可留在頁面看進度;YouTube 需站長家用電腦開著。</p>
+      </section>
+
+      <section id="topupSection" class="hidden">
+        <div class="step-head"><h2>儲值</h2></div>
+        <div id="payMsg"></div>
+        <div id="pkgList" class="pkgs"></div>
+        <p class="hint">線上刷卡 / LINE Pay 付款,額度自動入帳(付款完成後約數秒到帳)。</p>
       </section>
       <section>
         <div class="step-head" style="justify-content:space-between">
@@ -254,7 +362,8 @@
     </div>
 
     <p class="foot-note">
-      想用免費、自帶 OpenAI Key 的版本?<a href="../byok/">前往進階版(自備金鑰)→</a><br>
+      <a href="../">回免費試用首頁</a> ·
+      想用自己的 OpenAI Key?<a href="../byok/">前往進階版(自備金鑰)→</a><br>
       <a href="../privacy/">隱私權政策</a>
     </p>
   </div>
@@ -273,6 +382,7 @@
   };
   /* 付費轉錄後端(Render):處理上傳音檔的轉錄與扣點 */
   var BACKEND_URL = 'https://transcribe-yt-j7kv.onrender.com';
+  var MAX_JOB_MIN = 180;   // 單筆上限 3 小時(與後端 MAX_JOB_SEC 一致)
   /* ============================================================= */
 
   (function(){
@@ -284,12 +394,16 @@
       el.innerHTML='<div class="alert '+(kind||'ok')+'">'+text+'</div>';
     }
 
+    /* 深色模式:記住使用者選擇,否則跟隨系統(與首頁一致) */
     var modeBtn=$('modeBtn');
     function applyMode(m){
       if(m==='dark'){document.documentElement.setAttribute('data-mode','dark');modeBtn.textContent='☀️';}
       else{document.documentElement.removeAttribute('data-mode');modeBtn.textContent='🌙';}
     }
-    try{applyMode(localStorage.getItem('tw_mode')||'');}catch(e){}
+    try{
+      var savedMode=localStorage.getItem('tw_mode');
+      applyMode(savedMode!==null?savedMode:(matchMedia('(prefers-color-scheme:dark)').matches?'dark':''));
+    }catch(e){applyMode('');}
     modeBtn.addEventListener('click',function(){
       var dark=document.documentElement.getAttribute('data-mode')==='dark';
       var next=dark?'':'dark';applyMode(next);
@@ -445,8 +559,152 @@
     }
     $('histRefresh').addEventListener('click',loadHistory);
 
+    /* ---------- 來源分頁切換(與首頁一致) ---------- */
+    var srcMode='file';
+    function switchTab(m){
+      srcMode=m;
+      $('tabFile').classList.toggle('on',m==='file');
+      $('tabYt').classList.toggle('on',m==='yt');
+      $('paneFile').classList.toggle('hidden',m!=='file');
+      $('paneYt').classList.toggle('hidden',m!=='yt');
+      setMsg($('transcribeMsg'),'');
+    }
+    $('tabFile').addEventListener('click',function(){switchTab('file');});
+    $('tabYt').addEventListener('click',function(){switchTab('yt');});
+
+    /* ---------- 檔案拖放 + 長度預檢(與首頁一致;上限改計費版的 3 小時) ---------- */
+    var fileInput=$('audioFile'),drop=$('drop');
+    drop.addEventListener('click',function(){fileInput.click();});
+    ['dragover','dragenter'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.add('over');});});
+    ['dragleave','drop'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove('over');});});
+    drop.addEventListener('drop',function(e){if(e.dataTransfer.files.length){fileInput.files=e.dataTransfer.files;onFile();}});
+    fileInput.addEventListener('change',onFile);
+    var fileBlocked=false,precheckPending=false;
+    function setPre(text,kind){
+      var p=$('precheck');
+      if(!text){p.className='precheck';p.textContent='';return;}
+      p.className='precheck show '+kind;p.textContent=text;
+    }
+    function fmtDur(sec){
+      sec=Math.round(sec);
+      var h=Math.floor(sec/3600),m=Math.floor(sec%3600/60),s=sec%60;
+      function p(n){return (n<10?'0':'')+n;}
+      return h?h+':'+p(m)+':'+p(s):m+':'+p(s);
+    }
+    function onFile(){
+      var f=fileInput.files[0];
+      fileBlocked=false;precheckPending=false;setPre('');
+      if(!f){hide('fileName');return;}
+      $('fileName').textContent='已選擇:'+f.name;show('fileName');
+      if(f.size>500*1024*1024){
+        fileBlocked=true;
+        setPre('檔案超過 500 MB 上限,請壓縮或截短後再試。','err');
+        return;
+      }
+      /* 用瀏覽器讀時長:先告知會扣幾分鐘,超過 3 小時上限立即提示 */
+      precheckPending=true;
+      var url=URL.createObjectURL(f);
+      var au=document.createElement('audio');
+      au.preload='metadata';
+      au.onloadedmetadata=function(){
+        URL.revokeObjectURL(url);precheckPending=false;
+        var dur=au.duration;
+        if(isFinite(dur)&&dur>0){
+          if(dur>MAX_JOB_MIN*60+1){
+            fileBlocked=true;
+            setPre('這個檔約 '+fmtDur(dur)+',超過單筆 '+(MAX_JOB_MIN/60)+' 小時上限,請截短後分次轉錄。','err');
+          }else{
+            setPre('檔案長度約 '+fmtDur(dur)+',將扣約 '+Math.ceil(dur/60)+' 分鐘額度。','ok');
+          }
+        }
+        /* 讀不到時長就放行,後端仍會檢查 */
+      };
+      au.onerror=function(){URL.revokeObjectURL(url);precheckPending=false;};
+      au.src=url;
+    }
+
+    /* ---------- YouTube 預覽播放器(IFrame API,可標記起訖;與首頁一致) ---------- */
+    function ytId(url){
+      var m=url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([\w-]{11})/);
+      return m?m[1]:null;
+    }
+    var _ytApiState='idle',_ytApiWaiters=[];
+    function ytApiReady(cb){
+      if(_ytApiState==='ready'){setTimeout(cb,0);return;}
+      if(_ytApiState==='failed'){setTimeout(function(){cb(new Error('yt-api'));},0);return;}
+      _ytApiWaiters.push(cb);
+      if(_ytApiState==='loading')return;
+      _ytApiState='loading';
+      window.onYouTubeIframeAPIReady=function(){
+        _ytApiState='ready';
+        _ytApiWaiters.forEach(function(fn){fn();});
+        _ytApiWaiters=[];
+      };
+      var s=document.createElement('script');
+      s.src='https://www.youtube.com/iframe_api';
+      s.onerror=function(){
+        _ytApiState='failed';
+        _ytApiWaiters.forEach(function(fn){fn(new Error('yt-api'));});
+        _ytApiWaiters=[];
+      };
+      document.head.appendChild(s);
+    }
+    function ytPreviewFail(){
+      var l=$('ytLoading');
+      if(l){l.textContent='無法載入預覽(YouTube 連不上或影片無法播放),請直接手動輸入起訖時間。';}
+      $('markStart').disabled=true;$('markEnd').disabled=true;
+    }
+    var lastId=null,ytPlayer=null;
+    function destroyPlayer(){
+      if(ytPlayer){try{ytPlayer.destroy();}catch(e){}ytPlayer=null;}
+      $('markStart').disabled=true;$('markEnd').disabled=true;
+    }
+    $('ytUrl').addEventListener('input',function(){
+      var id=ytId(($('ytUrl').value||'').trim());
+      if(id===lastId)return;lastId=id;
+      destroyPlayer();
+      var frame=$('ytFrame');
+      frame.innerHTML='<div class="yt-loading" id="ytLoading">載入播放器中…</div>';
+      if(!id){hide('ytPreview');return;}
+      show('ytPreview');
+      var mount=document.createElement('div');mount.id='ytpv-mount';
+      frame.appendChild(mount);
+      ytApiReady(function(err){
+        if(!frame.isConnected||lastId!==id)return;
+        if(err){ytPreviewFail();return;}
+        ytPlayer=new YT.Player('ytpv-mount',{
+          videoId:id,
+          playerVars:{rel:0},
+          events:{
+            onReady:function(){
+              var l=$('ytLoading');if(l)l.style.display='none';
+              $('markStart').disabled=false;$('markEnd').disabled=false;
+            },
+            onError:function(){ytPreviewFail();}
+          }
+        });
+      });
+    });
+    function markTime(which){
+      if(!ytPlayer)return;
+      $(which==='start'?'ytStart':'ytEnd').value=fmtDur(ytPlayer.getCurrentTime());
+    }
+    $('markStart').addEventListener('click',function(){markTime('start');});
+    $('markEnd').addEventListener('click',function(){markTime('end');});
+
+    /* 贅詞/講者需搭配 AI 校正(與首頁一致) */
+    function syncOptDeps(){
+      var on=$('optCorrect').checked;
+      ['optFillers','optSpeakers'].forEach(function(id){
+        $(id).disabled=!on;
+        if(!on)$(id).checked=false;
+      });
+    }
+    $('optCorrect').addEventListener('change',syncOptDeps);
+    syncOptDeps();
+
     /* ---------- 轉錄任務:送出 /api/jobs → 輪詢 /api/jobs/{id} ---------- */
-    var fileInput=$('audioFile'),transcribeBtn=$('transcribeBtn');
+    var transcribeBtn=$('transcribeBtn');
     var busy=false,pollTimer=null;
 
     /* 解析時間輸入:'90'、'5:30'、'1:05:30'(全形冒號亦可);空回 null */
@@ -468,13 +726,35 @@
       show('progBox');$('progFill').style.width=(pct||0)+'%';$('progTxt').textContent=txt||'';
     }
 
+    /* 結果狀態:校正版/原始版 + 目前分頁,編輯即回存(與首頁一致) */
+    var result={fixed:'',raw:'',hasFixed:false},curTab='fixed';
+    function setTab(tab){
+      curTab=tab;
+      $('tabFixed').classList.toggle('on',tab==='fixed');
+      $('tabRaw').classList.toggle('on',tab==='raw');
+      $('resultText').value=tab==='fixed'?result.fixed:result.raw;
+    }
+    $('tabFixed').addEventListener('click',function(){setTab('fixed');});
+    $('tabRaw').addEventListener('click',function(){setTab('raw');});
+    $('resultText').addEventListener('input',function(){
+      if(curTab==='fixed')result.fixed=this.value;else result.raw=this.value;
+    });
+    function showResult(text,raw){
+      result.raw=raw||text||'';
+      result.hasFixed=!!raw;
+      result.fixed=text||'';
+      if(result.hasFixed){show('rtabs');setTab('fixed');}
+      else{hide('rtabs');setTab('raw');}
+      show('resultBox');
+    }
+
     transcribeBtn.addEventListener('click',function(){
       if(busy)return;
-      var f=fileInput.files[0];
-      var url=($('ytUrl').value||'').trim();
-      if(!f&&!url){setMsg($('transcribeMsg'),'請選擇音檔,或貼上 YouTube 網址。','err');return;}
       var form=new FormData();
-      if(url){
+      var isYt=(srcMode==='yt');
+      if(isYt){
+        var url=($('ytUrl').value||'').trim();
+        if(!url){setMsg($('transcribeMsg'),'請貼上 YouTube 網址。','err');return;}
         if(!/^https?:\/\/(www\.|m\.|music\.)?(youtube\.com\/|youtu\.be\/)/i.test(url)){
           setMsg($('transcribeMsg'),'這看起來不是 YouTube 網址。','err');return;}
         var s=parseTime($('ytStart').value),e=parseTime($('ytEnd').value);
@@ -484,12 +764,19 @@
         if(s!=null)form.append('start',s);
         if(e!=null)form.append('end',e);
       }else{
+        var f=fileInput.files[0];
+        if(!f){setMsg($('transcribeMsg'),'請選擇要轉錄的音檔。','err');return;}
+        if(precheckPending){setMsg($('transcribeMsg'),'正在檢查檔案長度,請稍候一秒再按。','ok');return;}
+        if(fileBlocked){setMsg($('transcribeMsg'),'這個檔案超過限制,請見上方提示。','err');return;}
         form.append('file',f,f.name);
       }
-      if($('optCorrect').checked)form.append('correct','true');
+      form.append('correct',$('optCorrect').checked?'true':'false');
+      form.append('timestamps',$('optTs').checked?'true':'false');
+      form.append('remove_fillers',$('optFillers').checked?'true':'false');
+      form.append('speakers',$('optSpeakers').checked?'true':'false');
       setBusy(true);hide('resultBox');
       setMsg($('transcribeMsg'),'');
-      showProg(0,url?'從 YouTube 取得音訊中……(伺服器/家用電腦喚醒可能需 30–60 秒)':'上傳中……');
+      showProg(0,isYt?'從 YouTube 取得音訊中……(伺服器/家用電腦喚醒可能需 30–60 秒)':'上傳中……');
       token().then(function(tk){
         return fetch(BACKEND_URL+'/api/jobs',{method:'POST',
           headers:{'Authorization':'Bearer '+tk,'ngrok-skip-browser-warning':'1'},body:form});
@@ -554,7 +841,7 @@
           curJob=null;try{localStorage.removeItem('tw_v2_job');}catch(e){}
           hide('progBox');setBusy(false);
           setMsg($('transcribeMsg'),'轉錄完成 ✓','ok');
-          $('resultText').value=d.text||'';show('resultBox');
+          showResult(d.text||'',d.raw||null);
           if(typeof d.remaining_credits==='number')setCredits(d.remaining_credits);
           loadFree();loadHistory();   // 免費額度/紀錄刷新
         }else{ // failed
@@ -573,11 +860,35 @@
       var jid=null;try{jid=localStorage.getItem('tw_v2_job');}catch(e){}
       if(jid){curJob=jid;setBusy(true);showProg(0,'接回進行中的任務……');pollJob(jid);}
     }
+
+    /* ---------- 結果操作:複製 / Word / txt(與首頁一致,檔名帶版本) ---------- */
+    function verName(){return (result.hasFixed&&curTab==='fixed')?'校正版':'原始版';}
+    function downloadBlob(blob,name){
+      var a=document.createElement('a');
+      var u=URL.createObjectURL(blob);
+      a.href=u;a.download=name;a.click();
+      setTimeout(function(){URL.revokeObjectURL(u);},1000);   // 延遲釋放,避免下載被中斷
+    }
     $('copyBtn').addEventListener('click',function(){
-      var t=$('resultText').value;
-      if(navigator.clipboard){navigator.clipboard.writeText(t);}
-      else{$('resultText').select();document.execCommand('copy');}
-      this.textContent='已複製';var b=this;setTimeout(function(){b.textContent='複製';},1500);
+      var ta=$('resultText'),self=this;
+      function done(){self.textContent='已複製 ✓';setTimeout(function(){self.textContent='複製';},1500);}
+      if(navigator.clipboard&&navigator.clipboard.writeText){
+        navigator.clipboard.writeText(ta.value).then(done).catch(function(){ta.select();document.execCommand('copy');done();});
+      }else{ta.select();try{document.execCommand('copy');done();}catch(e){}}
+    });
+    $('wordBtn').addEventListener('click',function(){
+      var text=$('resultText').value;
+      var paras=text.split(/\n+/).map(function(l){
+        return '<p style="font-size:12pt;line-height:1.8;margin:0 0 10pt 0;">'+escapeHtml(l)+'</p>';
+      }).join('');
+      var html='<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>逐字稿</title></head>'+
+        '<body style="font-family:標楷體,DFKai-SB,serif;">'+
+        '<h1 style="font-size:16pt;text-align:center;">逐字稿('+verName()+')</h1>'+
+        paras+'</body></html>';
+      downloadBlob(new Blob(['\ufeff',html],{type:'application/msword'}),'逐字稿_'+verName()+'.doc');
+    });
+    $('dlBtn').addEventListener('click',function(){
+      downloadBlob(new Blob(['\ufeff',$('resultText').value],{type:'text/plain;charset=utf-8'}),'逐字稿_'+verName()+'.txt');
     });
     function escapeHtml(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 

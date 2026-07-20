@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 SCHEMA_FILES = ["schema.sql", "schema_phase2.sql", "schema_phase3.sql",
                 "schema_phase4.sql", "schema_phase5.sql", "schema_history.sql",
-                "schema_pay.sql", "schema_phase6.sql", "schema_phase7.sql", "schema_phase8.sql"]
+                "schema_pay.sql", "schema_phase6.sql", "schema_phase7.sql", "schema_phase8.sql", "schema_phase9.sql"]
 V2 = os.path.join(os.path.dirname(__file__), "..", "v2")
 STUB = """
 create schema if not exists auth;
@@ -81,11 +81,13 @@ def dbmain(monkeypatch):
     monkeypatch.setattr(main, "_relay_info", lambda url: {"duration": 600, "too_long": False})
     monkeypatch.setattr(main, "_reject_live", lambda meta: None)
     monkeypatch.setattr(main, "_relay_fetch_audio", lambda url, s, e, dest: open(dest, "wb").write(b"x"))
-    monkeypatch.setattr(main, "_transcode_and_segment", lambda src, tmp: ["seg0", "seg1"])
+    monkeypatch.setattr(main, "_transcode_and_segment",
+                        lambda src, tmp, normalized=False: ["seg0", "seg1"])
     monkeypatch.setattr(main, "_ffprobe_seconds", lambda p: 600.0)
     monkeypatch.setattr(main, "_whisper_transcribe", lambda p, k: "逐字稿片段")
     monkeypatch.setattr(main, "_gpt_correct",
-                        lambda t, k, remove_fillers=False, speakers=False, usage=None: t + "（校正）")
+                        lambda t, k, remove_fillers=False, speakers=False, usage=None,
+                        on_progress=None: t + "（校正）")
     yield main, conn
     conn.close()
 
@@ -141,6 +143,36 @@ def test_cancel_refunds(dbmain):
     rc = c.post(f"/api/jobs/{jid}/cancel", headers={"Authorization": "Bearer x"})
     assert rc.status_code == 200 and rc.json()["remaining_credits"] == 100000
     assert conn.execute("select status from public.usage_logs where id=%s", (jid,)).fetchone()[0] == "cancelled"
+
+
+def test_options_carried_through_queue(dbmain, monkeypatch):
+    """phase9:選項寫入佇列、claim 帶回、worker 依選項處理(關時間戳、開去贅詞)"""
+    main, conn = dbmain
+    uid = _mk_user(conn)
+    main._TEST_UID = str(uid)
+    c = _client(main)
+    got_corr = {}
+
+    def fake_correct(t, k, remove_fillers=False, speakers=False, usage=None, on_progress=None):
+        got_corr.update({"remove_fillers": remove_fillers, "speakers": speakers})
+        return t + "（校正）"
+    monkeypatch.setattr(main, "_gpt_correct", fake_correct)
+
+    r = c.post("/api/jobs", data={"youtube_url": "https://youtu.be/dQw4w9WgXcQ", "correct": "true",
+                                  "timestamps": "false", "remove_fillers": "true", "speakers": "false"},
+               headers={"Authorization": "Bearer x"})
+    assert r.status_code == 200, r.text
+    jid = r.json()["job_id"]
+    # 選項已入列
+    opts = conn.execute("select options from public.usage_logs where id=%s", (jid,)).fetchone()[0]
+    assert opts == {"timestamps": False, "remove_fillers": True, "speakers": False}
+    # claim 帶回選項;worker 依選項:結果無 [00:00:00] 前綴、校正收到 remove_fillers=True
+    row = main._rpc1("claim_next_job", {"p_stale_sec": 180, "p_max_retry": 2})
+    assert row["options"] == opts
+    main._process_job(row["usage_id"], row["user_id"], row, "sk-test")
+    txt = conn.execute("select result_text from public.usage_logs where id=%s", (jid,)).fetchone()[0]
+    assert txt and "[00:00:00]" not in txt and "校正" in txt
+    assert got_corr == {"remove_fillers": True, "speakers": False}
 
 
 def test_upload_lost_fails_and_refunds(dbmain):

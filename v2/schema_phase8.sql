@@ -66,6 +66,11 @@ end;
 $$;
 
 -- ---------- enqueue:預扣額度 + 建立 queued 任務 ----------
+-- 先移除新舊簽名(階段九加了 p_options;重複執行或跨版本重跑時避免簽名衝突/重載歧義)
+drop function if exists public.enqueue_transcription(
+  uuid, integer, text, text, integer, integer, text, integer, integer, text, boolean, jsonb);
+drop function if exists public.enqueue_transcription(
+  uuid, integer, text, text, integer, integer, text, integer, integer, text, boolean);
 create or replace function public.enqueue_transcription(
   p_user_id     uuid,
   p_cost        integer,
@@ -147,6 +152,8 @@ end;
 $$;
 
 -- ---------- claim:認領一筆 queued(先把可重試的心跳過期任務退回佇列) ----------
+-- 階段九擴充了回傳欄位;先 drop 避免「cannot change return type」(重跑順序不拘)
+drop function if exists public.claim_next_job(integer, integer);
 create or replace function public.claim_next_job(p_stale_sec integer, p_max_retry integer)
 returns table (usage_id uuid, user_id uuid, source_type text, youtube_url text,
                start_seconds integer, end_seconds integer, upload_path text,

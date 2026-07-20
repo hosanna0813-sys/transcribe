@@ -74,3 +74,6 @@ services:
       # 背景任務就地 Worker 同時處理數(免費方案單實例,預設 1;記憶體允許可調 2)
       - key: WORKER_CONCURRENCY
         sync: false
+      # 同一任務內分段並行轉錄數(預設 6;成本不變,只影響速度)
+      - key: CHUNK_WORKERS
+        sync: false
