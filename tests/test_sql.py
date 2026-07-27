@@ -13,7 +13,7 @@ if not DB:
 SCHEMA_FILES = ["schema.sql", "schema_phase2.sql", "schema_phase3.sql",
                 "schema_phase4.sql", "schema_phase5.sql", "schema_history.sql",
                 "schema_pay.sql", "schema_phase6.sql", "schema_phase7.sql",
-                "schema_phase8.sql", "schema_phase9.sql"]
+                "schema_phase8.sql", "schema_phase9.sql", "schema_phase10.sql"]
 V2 = os.path.join(os.path.dirname(__file__), "..", "v2")
 
 STUB = """
@@ -154,6 +154,26 @@ def test_queue_stale_requeue_and_sweep(conn):
     status, err = conn.execute("select status, error_code from public.usage_logs where id=%s", (jid,)).fetchone()
     assert status == "failed" and err == "stale_timeout"
     assert conn.execute("select remaining_credits from public.credit_balances where user_id=%s", (uid,)).fetchone()[0] == 1000
+
+
+def test_read_result_keeps_text_and_30d_ttl(conn):
+    """phase10:read_result 不清空(可重複讀);TTL 預設 30 天;到期仍由 expire_results 清除"""
+    uid = _new_user(conn)
+    ok, jid = _reserve(conn, uid, 300, 0)
+    assert ok
+    conn.execute("select ok from public.complete_transcription(%s,%s,300,0.01,'保留內容')", (jid, uid))
+    days = conn.execute(
+        "select extract(epoch from (expires_at - now())) / 86400 from public.usage_logs where id=%s",
+        (jid,)).fetchone()[0]
+    assert 29 < float(days) <= 30.1, f"TTL 應約 30 天,得到 {days}"
+    for _ in range(2):   # 讀兩次內容都在(舊 claim_result 讀一次即清)
+        t = conn.execute("select result_text from public.read_result(%s,%s)", (jid, uid)).fetchone()[0]
+        assert t == "保留內容"
+    assert conn.execute("select result_text from public.usage_logs where id=%s", (jid,)).fetchone()[0] == "保留內容"
+    # 到期 → expire_results 照常去內容化;使用者手動刪除路徑(delete_usage_content)不變
+    conn.execute("update public.usage_logs set expires_at = now() - interval '1 min' where id=%s", (jid,))
+    assert conn.execute("select public.expire_results()").fetchone()[0] >= 1
+    assert conn.execute("select result_text from public.usage_logs where id=%s", (jid,)).fetchone()[0] is None
 
 
 def test_check_constraints(conn):

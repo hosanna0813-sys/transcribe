@@ -330,7 +330,8 @@
           <textarea id="resultText" placeholder="可直接在此編輯"></textarea>
         </div>
         <p class="hint">轉錄費用依音檔長度扣除(1 秒 = 1 credit;60 秒 = 1 分鐘),最長 3 小時。
-        長音檔會自動分段處理,送出後可留在頁面看進度;YouTube 需站長家用電腦開著。</p>
+        長音檔會自動分段處理,送出後可留在頁面看進度;YouTube 需站長家用電腦開著。
+        完成的逐字稿會保留 <b>30 天</b>,期間可在下方「使用紀錄」隨時檢視、下載,也可手動刪除。</p>
       </section>
 
       <section id="topupSection" class="hidden">
@@ -522,9 +523,25 @@
     function fmtLen(sec){sec=Math.round(sec||0);var m=Math.floor(sec/60),s=sec%60;return m+':'+(s<10?'0':'')+s;}
     function loadHistory(){
       sb.from('usage_logs')
-        .select('id,created_at,source_type,source_name,youtube_url,duration_seconds,credits_charged,free_credits,status')
+        .select('id,created_at,source_type,source_name,youtube_url,duration_seconds,credits_charged,free_credits,status,expires_at')
         .order('created_at',{ascending:false}).limit(20)
         .then(function(res){renderHistory((res.data)||[]);},function(){renderHistory(null);});
+    }
+    /* 檢視歷史逐字稿:點擊時才單筆撈內容(列表不載全文),塞進上方結果區 */
+    function viewHistory(id,btn){
+      btn.disabled=true;btn.textContent='讀取中…';
+      sb.from('usage_logs').select('result_text').eq('id',id).maybeSingle()
+        .then(function(res){
+          var t=res.data&&res.data.result_text;
+          if(t){
+            showResult(t,null);
+            setMsg($('transcribeMsg'),'已載入歷史逐字稿,可編輯/複製/下載','ok');
+            $('resultBox').scrollIntoView({behavior:'smooth',block:'start'});
+          }else{
+            setMsg($('transcribeMsg'),'這筆逐字稿內容已過期或已刪除,無法再檢視','err');
+          }
+        },function(){setMsg($('transcribeMsg'),'讀取失敗,請稍後再試','err');})
+        .then(function(){btn.disabled=false;btn.textContent='檢視逐字稿';});
     }
     function renderHistory(rows){
       var ul=$('histList');ul.innerHTML='';
@@ -542,12 +559,22 @@
         var top=document.createElement('div');top.className='h-top';
         top.innerHTML='<span class="h-nm">'+escapeHtml(name)+'</span><span class="h-st '+stCls+'">'+stTxt+'</span>';
         var meta=document.createElement('div');meta.className='h-meta';
-        meta.textContent=fmtDate(r.created_at)+' · 長度 '+fmtLen(r.duration_seconds)+(costTxt?(' · '+costTxt):'');
+        var keepTxt='';
+        if(r.status==='completed'&&r.expires_at){
+          try{var ed=new Date(r.expires_at);keepTxt=' · 內容保留至 '+(ed.getMonth()+1)+'/'+ed.getDate();}catch(e){}
+        }
+        meta.textContent=fmtDate(r.created_at)+' · 長度 '+fmtLen(r.duration_seconds)+(costTxt?(' · '+costTxt):'')+keepTxt;
         li.appendChild(top);li.appendChild(meta);
+        if(r.status==='completed'){
+          var vw=document.createElement('button');vw.className='h-del';vw.style.color='var(--accent)';
+          vw.style.marginRight='12px';vw.textContent='檢視逐字稿';
+          vw.addEventListener('click',function(){viewHistory(r.id,vw);});
+          li.appendChild(vw);
+        }
         if(r.source_name||r.youtube_url){
           var del=document.createElement('button');del.className='h-del';del.textContent='刪除此紀錄內容';
           del.addEventListener('click',function(){
-            if(!confirm('刪除後此紀錄的檔名/網址將清空(帳務仍保留),無法復原。確定?'))return;
+            if(!confirm('刪除後此紀錄的逐字稿內容與檔名/網址將清空(帳務仍保留),無法復原。確定?'))return;
             del.disabled=true;del.textContent='刪除中…';
             sb.rpc('delete_usage_content',{p_usage_id:r.id}).then(function(){loadHistory();},
               function(){del.disabled=false;del.textContent='刪除失敗,重試';});
