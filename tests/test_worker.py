@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 SCHEMA_FILES = ["schema.sql", "schema_phase2.sql", "schema_phase3.sql",
                 "schema_phase4.sql", "schema_phase5.sql", "schema_history.sql",
-                "schema_pay.sql", "schema_phase6.sql", "schema_phase7.sql", "schema_phase8.sql", "schema_phase9.sql"]
+                "schema_pay.sql", "schema_phase6.sql", "schema_phase7.sql", "schema_phase8.sql", "schema_phase9.sql", "schema_phase10.sql"]
 V2 = os.path.join(os.path.dirname(__file__), "..", "v2")
 STUB = """
 create schema if not exists auth;
@@ -129,6 +129,11 @@ def test_enqueue_worker_complete(dbmain):
     # 輪詢回 done
     got = c.get(f"/api/jobs/{jid}", headers={"Authorization": "Bearer x"}).json()
     assert got["status"] == "done" and "校正" in got["text"]
+    # phase10:輪詢取走後,DB 逐字稿仍保留(歷史紀錄可回看/下載)
+    assert conn.execute("select result_text from public.usage_logs where id=%s", (jid,)).fetchone()[0]
+    # 重新整理後再查(記憶體已清)→ 走 read_result,內容仍在
+    got2 = c.get(f"/api/jobs/{jid}", headers={"Authorization": "Bearer x"}).json()
+    assert got2["status"] == "done" and "校正" in got2["text"]
 
 
 def test_cancel_refunds(dbmain):

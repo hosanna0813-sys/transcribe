@@ -81,3 +81,47 @@ def test_jobs_phase8_missing_still_503(jobenv, monkeypatch):
     r = _post(m, {"youtube_url": "https://youtu.be/dQw4w9WgXcQ"})
     assert r.status_code == 503
     assert "升級中" in r.json()["detail"]
+
+
+# ---------- 歷史結果查詢(phase10:read_result 不清空 + 部署順序 fallback) ----------
+
+def _get_status(m, job_id):
+    c = TestClient(m.app)
+    return c.get(f"/api/jobs/{job_id}", headers={"Authorization": "Bearer x"})
+
+
+def test_job_status_uses_read_result(jobenv, monkeypatch):
+    """記憶體沒有此任務(重新整理後查)→ 走 read_result,不清空"""
+    m = jobenv
+    calls = []
+
+    def fake_rpc(fn, payload):
+        calls.append(fn)
+        assert fn == "read_result"
+        return [{"result_text": "保留的逐字稿", "status": "completed", "credits_charged": 60}]
+
+    monkeypatch.setattr(m, "_sb_rpc", fake_rpc)
+    monkeypatch.setattr(m, "_sb_balance", lambda uid: 120)
+    r = _get_status(m, "22222222-2222-2222-2222-222222222222")
+    assert r.status_code == 200
+    assert r.json()["status"] == "done" and r.json()["text"] == "保留的逐字稿"
+    assert calls == ["read_result"]
+
+
+def test_job_status_fallback_claim_result_on_pgrst202(jobenv, monkeypatch):
+    """phase10 未套用(read_result 不存在)→ 自動退回舊 claim_result,查詢照常"""
+    m = jobenv
+    calls = []
+
+    def fake_rpc(fn, payload):
+        calls.append(fn)
+        if fn == "read_result":
+            raise HTTPException(502, 'RPC 失敗:{"code":"PGRST202","message":"read_result not found"}')
+        assert fn == "claim_result"
+        return [{"result_text": "舊路徑文字", "status": "completed", "credits_charged": 60}]
+
+    monkeypatch.setattr(m, "_sb_rpc", fake_rpc)
+    monkeypatch.setattr(m, "_sb_balance", lambda uid: 120)
+    r = _get_status(m, "33333333-3333-3333-3333-333333333333")
+    assert r.status_code == 200 and r.json()["text"] == "舊路徑文字"
+    assert calls == ["read_result", "claim_result"]

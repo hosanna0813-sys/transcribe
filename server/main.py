@@ -1573,10 +1573,7 @@ def api_job_status(job_id: str, authorization: str | None = Header(None)):
         if st == "done":
             with _v3_lock:
                 _v3_jobs.pop(job_id, None)
-            try:                            # 清掉 DB 暫存逐字稿(去內容化)
-                _sb_rpc("claim_result", {"p_usage_id": job_id, "p_user_id": uid})
-            except Exception:
-                pass
+            # 逐字稿保留在 DB(30 天,expire_results 到期清除),供歷史紀錄回看/下載
             rem = j.get("remaining") or 0
             return {"status": "done", "progress": 100, "text": j.get("text", ""),
                     "raw": j.get("raw"),   # 校正前原始版(僅本實例記憶體有;無校正時為 null)
@@ -1587,8 +1584,15 @@ def api_job_status(job_id: str, authorization: str | None = Header(None)):
             return {"status": "failed", "error": j.get("error", "轉錄失敗")}
         return {"status": "processing", "stage": j.get("stage", ""), "progress": j.get("progress", 0)}
 
-    # 不在記憶體:可能已被別的輪詢取走,或本實例重啟後由 worker 接手中
-    res = _sb_rpc("claim_result", {"p_usage_id": job_id, "p_user_id": uid})
+    # 不在記憶體:可能已完成(重新整理後查詢),或本實例重啟後由 worker 接手中
+    try:
+        res = _sb_rpc("read_result", {"p_usage_id": job_id, "p_user_id": uid})
+    except HTTPException as e:
+        # 尚未套用 schema_phase10(無 read_result)→ 退回舊的 claim_result(讀後清空)
+        if "PGRST202" in str(getattr(e, "detail", "")):
+            res = _sb_rpc("claim_result", {"p_usage_id": job_id, "p_user_id": uid})
+        else:
+            raise
     row = (res[0] if res else None) if isinstance(res, list) else res
     if not row:
         raise HTTPException(404, "找不到這個任務")
@@ -1599,7 +1603,7 @@ def api_job_status(job_id: str, authorization: str | None = Header(None)):
             bal = _sb_balance(uid)
             return {"status": "done", "progress": 100, "text": text,
                     "remaining_credits": bal, "remaining_minutes": bal // 60}
-        return {"status": "done", "progress": 100, "text": "", "note": "結果已取走"}
+        return {"status": "done", "progress": 100, "text": "", "note": "內容已過期或已刪除"}
     if status in ("reserved", "queued", "processing"):
         # 不再因重啟就判失敗:worker 會重新認領/重試,逾時退款由 sweep 處理
         _worker_wake.set()
